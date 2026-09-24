@@ -8,24 +8,16 @@ renv::restore()
 
 # set up renv
 renv::init()
-# install packages
+# install core setup packages
 renv::install("tidyverse")
 renv::install("here")
 renv::install("usethis")
 renv::install("pak")
 renv::install("devtools")
-pak::pkg_install("ddauber/r4np")
+renv::install("ddauber/r4np")
 
-# movement & time-series data analysis
-renv::install("dygraphs")
-renv::install("xts")
-renv::install("tidyr")
 # machine learning
-renv::install("umap")
-pak::pak("YuHuiDeakin/rabc")
-#plotting
-renv::install("RColorBrewer")
-renv::install("htmlwidgets")
+renv::install("YuHuiDeakin/rabc")
 
 # load packages
 library(tidyverse)
@@ -33,19 +25,11 @@ library(here)
 library(usethis)
 library(pak)
 library(devtools)
-library(stringi)
 library(r4np)
-library(data.table)
-# movement & time-series data analysis
-library(dygraphs)
-library(xts)
-library(tidyr)
+
 # machine learning
-library(umap)
 library(rabc)
-# plotting
-library(RColorBrewer)
-library(htmlwidgets)
+
 
 # save packages to lockfile
 renv::snapshot()
@@ -58,5 +42,5 @@ usethis::use_blank_slate()
 # r4np::create_project_folder()
 
 # set up git
-# usethis::use_git()
-# usethis::use_github() # use this code to create GitHub repo, but I already did this before manually
+usethis::use_git()
+usethis::use_github() # use this code to create GitHub repo, but I already did this before manually
