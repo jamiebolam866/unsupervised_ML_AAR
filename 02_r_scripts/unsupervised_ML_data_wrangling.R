@@ -451,6 +451,230 @@ cats_tsbl <- cats |>
   add_segments(min_gap_s = 5, label_col = "label") |>
   make_bouts(min_gap_s = 5, duration_s = 2, fs = 40)
 
+# check the data is ok
+any(has_gaps(cats_tsbl)$.gaps) # should be FALSE
+
+# data exploration
+n_distinct(cats_tsbl$id)
+
+# how many bouts per ind?
+cats_tsbl %>%
+  as_tibble() %>%
+  group_by(id) %>%
+  summarise(n_bouts = n_distinct(bout)) %>%
+  arrange(desc(n_bouts))
+
+# how many behaviours & bouts per ind?
+cats_tsbl %>%
+  as_tibble() %>%
+  group_by(id, label) %>%
+  summarise(n_bouts = n_distinct(bout)) %>%
+  arrange(desc(n_bouts))
+# View()
+
+# how many behaviour bouts per ind - showing all behaviours per ind?
+cats_tsbl %>%
+  as_tibble() %>%
+  group_by(id, label) %>%
+  summarise(n_bouts = n_distinct(bout)) %>%
+  arrange(desc(n_bouts)) %>%
+  pivot_wider(names_from = label, values_from = n_bouts)
+# %>%
+# View()
+
+# stacked bar chart + total bouts per ind underneath
+cat_bouts <- cats_tsbl |>
+  as_tibble() |>
+  distinct(id, bout, label) # one row per bout
+
+id_order_cats <- cats_tsbl |> count(id, sort = TRUE) |> pull(id) # most bouts first
+
+p_n_cat <- cat_bouts |>
+  count(id, name = "n_bouts") |>
+  ggplot(aes(factor(id, id_order_cats), n_bouts)) +
+  geom_col(fill = "grey40") +
+  labs(x = NULL, y = "Bouts") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90))
+
+p_prop_cat <- cat_bouts |>
+  count(id, label) |>
+  ggplot(aes(factor(id, id_order_cats), n, fill = label)) +
+  geom_col(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_brewer(palette = "Dark2") +
+  labs(x = "ID", y = "Share of bouts", fill = "Behaviour") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90))
+
+p_n_cat / p_prop_cat + plot_layout(heights = c(1, 2), guides = "collect")
+
+# visualise and inspect data
+plot_signal(
+  cats_tsbl,
+  c(acc_x, acc_y, acc_z),
+  mode = "behaviours",
+  id = "M1",
+  fs = 40
+)
+
+plot_signal(
+  cats_tsbl,
+  acc_x:acc_z,
+  mode = "individuals",
+  behaviour = "Trot",
+  fs = 40
+)
+
 # run workflow on these to check feature calculation and UMAP works
+# feature calculation - cats labelled
+tic()
+cats_lab_features <- calc_features(
+  cats_tsbl,
+  c(acc_x, acc_y, acc_z),
+  feature_set = c("catch22", "rabc_time2", "rabc_freq"),
+  winlen_dba_s = 1, # 2s segment windows
+  fs = 40,
+  catch24 = TRUE
+)
+toc()
+BRRR::skrrrahh("soulja")
+
+# check impact of window length for DBA calculations
+# winlen sensitvity - figure out wtf this is doing
+# res <- winlen_sensitivity(vultures_tsbl, fs = 20)
+res_cats <- winlen_sensitivity(
+  cats_tsbl,
+  fs = 40,
+  winlen_s = c(0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2),
+  ref_s = 1
+)
+res_cats$overview # one row per window
+res_cats$plots$separation # also $odba_by_label, $stability_cost
+
+# view features projected
+cats_lab_features %>%
+  #   mutate(label = if_else(label == "Walk", "Walk", "Other")) %>%
+  project_features(
+    norm_method = "zScore",
+    feature_set = c("catch22", "rabc_time2", "rabc_freq"),
+    unit_int = TRUE,
+    low_dim_method = "UMAP",
+    seed = 12
+  ) %>%
+  plot()
+
+cats_lab_features %>%
+  #   mutate(label = if_else(label == "Walk", "Walk", "Other")) %>%
+  project_features(
+    norm_method = "zScore",
+    feature_set = "rabc_freq",
+    unit_int = TRUE,
+    low_dim_method = "UMAP",
+    seed = 12
+  ) %>%
+  plot()
 
 # then can go onto clustering or some other thing to test & select features
+
+# trying with cats - unlabelled
+# remove label column
+cats_unlab <- cats %>% select(-label)
+
+# segment + format data
+cats_unlab |>
+  add_segments(min_gap_s = 2) %>%
+  View()
+
+cats_unlab %>%
+  make_bouts(min_gap_s = 2, duration_s = 2, fs = 40) # %>% View()
+
+cats_unlab_tsbl <- cats_unlab |>
+  add_segments(min_gap_s = 2) |>
+  make_bouts(min_gap_s = 2, duration_s = 2, fs = 40)
+# seems to be same output with or without add_segments
+# confirm with Claude what add_segments actually does then!
+
+# check the data is ok
+any(has_gaps(cats_unlab_tsbl)$.gaps) # should be FALSE
+
+# data exploration
+n_distinct(cats_unlab_tsbl$id)
+
+# total bouts per ind
+cat_unlab_bouts <- cats_unlab_tsbl |>
+  as_tibble() |>
+  distinct(id, bout) # one row per bout
+
+id_order_cats_unlab <- cats_unlab_tsbl |> count(id, sort = TRUE) |> pull(id) # most bouts first
+
+cat_unlab_bouts |>
+  count(id, name = "n_bouts") |>
+  ggplot(aes(factor(id, id_order_cats_unlab), n_bouts)) +
+  geom_col(fill = "grey40") +
+  labs(x = NULL, y = "Bouts") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90))
+
+# visualise signal
+plot_signal(cats_unlab_tsbl, acc_x:acc_z, mode = "time", id = "F1", fs = 40)
+
+# feature calculation - cats unlabelled
+tic()
+cats_unlab_features <- calc_features(
+  cats_unlab_tsbl,
+  c(acc_x, acc_y, acc_z),
+  feature_set = c("catch22", "rabc_time2", "rabc_freq"),
+  winlen_dba_s = 1, # 2s segment windows
+  fs = 40,
+  catch24 = TRUE
+)
+toc()
+BRRR::skrrrahh("liljon")
+
+# project and try identify patterns
+cats_unlab_features %>%
+  project_features(
+    norm_method = "zScore",
+    feature_set = "rabc_freq",
+    unit_int = TRUE,
+    low_dim_method = "UMAP",
+    seed = 12
+  ) %>%
+  plot()
+
+cats_unlab_features %>%
+  project_features(
+    norm_method = "zScore",
+    feature_set = "rabc_time",
+    unit_int = TRUE,
+    low_dim_method = "UMAP",
+    seed = 12
+  ) %>%
+  plot()
+
+cats_unlab_features %>%
+  project_features(
+    norm_method = "zScore",
+    feature_set = "rabc_time2",
+    unit_int = TRUE,
+    low_dim_method = "UMAP",
+    seed = 12
+  ) %>%
+  plot()
+
+cats_unlab_features %>%
+  project_features(
+    norm_method = "zScore",
+    feature_set = "catch22",
+    unit_int = TRUE,
+    low_dim_method = "UMAP",
+    seed = 12
+  ) %>%
+  plot()
+
+# next step - build shiny app to interactively toggle given features on or off before projecting
+# features in shiny app listed based on the feature_set(s) listed in project_features!
+# so shiny app feature check buttons will be dependent on what is available in the feature set
+vulture_features |>
+  explore_features()

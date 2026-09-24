@@ -2447,631 +2447,642 @@ plot.calc_projection <- function(
     )
 }
 
-# misc / old functions
-# old calc_features before adding custom features and custom cross-features
+# project_features_2 (expanded)
+# project_features.R -----------------------------------------------------------
+# Dimension reduction (project_features()) and its plot() method for the wide
+# tibble calc_features() returns: one row per bout, feature columns named
+# <feature_set>__<stream>__<feature>.
+#
+# Adapted from theftdlc::project() and theftdlc:::plot.feature_projection().
+# theftdlc's calculate_features() returns a LONG feature_calculations object
+# (id, group, feature_set, names, values) with one measured variable, so
+# project() first pivots it wide. calc_features() is already wide -- same
+# principle as the tsibble itself: genuinely multivariate, no fold/unfold --
+# so here we just select the feature columns and normalise each in place;
+# there is no long-to-wide reshape at all.
+#
+# Requires: normaliseR, tibble, dplyr, rlang, stats, and, depending on
+# low_dim_method: Rtsne (tSNE), MASS (KruskalMDS, SammonMDS), umap (UMAP).
+# ggplot2 for plot.calc_projection().
+#
+# Deliberate deviations from theftdlc, needed so every low_dim_method produces
+# the SAME shape and one simple plot() method can serve all of them:
+#   * PCA: theftdlc's project() puts the raw prcomp object in BOTH ModelFit
+#     and ProjectedData, and its plot() then re-derives 2D coordinates via
+#     broom::augment()/tidy(). We extract the first two PC scores into
+#     ProjectedData ($id/$.fitted1/$.fitted2) directly and keep the full
+#     prcomp object only in ModelFit -- no broom dependency needed.
+#   * KruskalMDS / SammonMDS: theftdlc's project() attaches the row id to
+#     `fits$id` (the MODEL FIT, i.e. the isoMDS/sammon() return value) rather
+#     than `projected$id` -- an apparent bug: ProjectedData for these two
+#     methods ends up with no id column at all, and its own plot() method
+#     (which reads $ProjectedData$.fitted1) would also fail on them, since
+#     those columns are unnamed there too. Both are fixed here.
+#
+# Column selection: `feature_set` filters by the SAME prefix calc_features()
+# writes into every feature column name (e.g. "catch22", "rabc_time2"), so
+# projecting a single feature set, or a chosen few, is `feature_set = "catch22"`
+# / `feature_set = c("catch22", "rabc_time2")`. NULL uses every feature column
+# present, whichever set(s) they came from. `cols` selects exact feature column
+# names instead (e.g. for a UI that lets someone tick individual features, not
+# whole sets); give one or the other, not both. `Data` in the returned object
+# is always the untouched, full `data` you passed in regardless of which
+# columns were modelled -- so plot()'s `colour_by` can reference ANY original
+# column, feature or not, even one that wasn't part of this particular run.
 
-# # calc_features --------------------------------------------------------
-# # Bout-level feature calculation for a tidy sensor tsibble
-# # (key = c(id, bout), index = sample_in_bout or datetime, one column per stream).
-# # Modelled on theft::calc_features(), but multivariate: any sensor columns
-# # can be chosen, and feature sets that combine axes (ODBA, cor_x_y, ...) are
-# # supported.
-# #
-# # Requires: tsibble, tibble, dplyr, tidyr, tidyselect, rlang, vctrs, zoo,
-# #           entropy, Rcatch22
-# #
-# # NOTE: this is deliberately named calc_features(), as requested. If you
-# # also attach {theft}, whichever is attached/sourced last masks the other; call
-# # theft's version as theft::calc_features().
-# #
-# # Feature sets
-# #   catch22     Rcatch22 features on EVERY selected stream (any numeric
-# #               column). `catch24 = TRUE` adds DN_Mean and DN_Spread_Std.
-# #   rabc_time1  Original rabc time-domain set: per-axis mean, variance, sd,
-# #               max, min, range, plus ODBA.
-# #   rabc_time2  Expanded set = rabc_time1 + per-axis norm, cross-axis cov / cor /
-# #               meandiff / sddiff, and per-axis varsba / vardba / maxdba.
-# #               It CONTAINS rabc_time1, so if both are requested only
-# #               rabc_time2 is computed (with a message).
-# #   rabc_freq   Per-axis dominant frequency (freqmain), its amplitude
-# #               (freqamp) and a spectral entropy term (entropy).
-# #
-# # Accelerometer axes for the rabc sets
-# #   The rabc sets read the columns named in `acc_cols` (default acc_x, acc_y,
-# #   acc_z) from the selected `cols`. Missing axes do not cause an error:
-# #     * x, y and z present -> ODBA
-# #     * two axes present   -> PDBA_xy / PDBA_xz / PDBA_yz in place of ODBA, and
-# #                             only the cross-axis features for that pair
-# #     * one axis present   -> PDBA_x / PDBA_y / PDBA_z, no cross-axis features
-# #   An error is raised only if NONE of the axes is selected.
-# #
-# # Output (a plain tibble, one row per bout)
-# #   key columns (e.g. id, bout), then context columns (e.g. attachment, label;
-# #   any non-selected column that is constant within every bout), then feature
-# #   columns named   <feature_set>__<stream>__<feature>
-# #   e.g. catch22__acc_x__DN_HistogramMode_5, rabc_time2__acc_x_acc_y__cor,
-# #        rabc_time1__acc_x_acc_y_acc_z__ODBA, rabc_time1__acc_x_acc_z__PDBA_xz
-# #   Use feature_long() to pivot into a long theft-style layout.
-# #
-# # Dynamic-acceleration window (rabc_time sets)
-# #   ODBA/PDBA, varsba, vardba and maxdba split each axis into a static part (a
-# #   centred moving average) and a dynamic part (raw minus static). Set the
-# #   window with EITHER
-# #     winlen_dba_s  seconds (needs `fs`); the recommended, dataset-independent
-# #                   way. Converted to an ODD number of samples:
-# #                   n = 2 * floor(winlen_dba_s * fs / 2) + 1, so the window is
-# #                   centred on a sample. e.g. 1 s at 20 Hz -> 21 samples.
-# #     winlen_dba    samples; use to reproduce earlier rabc results exactly.
-# #   Giving both is an error; there is no default. The resolved window and the
-# #   share of a median-length bout lost to edge NAs are always reported.
-# #
-# # Missing values: a bout with any NA / non-finite value in a stream a set
-# #   needs gets NA for that set's features (per stream for catch22; for the whole
-# #   set for rabc sets, since features combine axes). Features that are
-# #   undefined (e.g. a correlation on a constant signal) are also NA. A message
-# #   reports how many bouts are affected.
-# #
-# # `seed`: every set implemented so far is deterministic. The argument exists
-# #   for parity with theft::calc_features() and future stochastic sets.
+# Split calc_features() output into feature columns (matched by the
+# <feature_set>__<stream>__<feature> naming, i.e. exactly two "__" delimiters)
+# and everything else (key + context columns).
+.split_feature_cols <- function(nms) {
+  n_delim <- lengths(regmatches(nms, gregexpr("__", nms, fixed = TRUE)))
+  is_feat <- n_delim == 2
+  info <- NULL
+  if (any(is_feat)) {
+    parts <- strsplit(nms[is_feat], "__", fixed = TRUE)
+    info <- tibble::tibble(
+      column = nms[is_feat],
+      feature_set = vapply(parts, `[`, character(1), 1),
+      stream = vapply(parts, `[`, character(1), 2),
+      feature = vapply(parts, `[`, character(1), 3)
+    )
+  }
+  list(feature = nms[is_feat], meta = nms[!is_feat], info = info)
+}
 
-# .feature_sets <- c("catch22", "rabc_time1", "rabc_time2", "rabc_freq")
+#' Reduce a calc_features() feature tibble to two dimensions
+#'
+#' @param data           Output of calc_features(): one row per bout/sample,
+#'                       feature columns named <feature_set>__<stream>__<feature>.
+#' @param feature_set    Character vector of feature_set(s) to project (e.g.
+#'                       "catch22", or c("catch22", "rabc_time2")). NULL
+#'                       (default) uses every feature column present. Give
+#'                       this or `cols`, not both.
+#' @param cols           Character vector of EXACT feature column names to
+#'                       project (e.g. for per-feature, not per-set, selection).
+#'                       Give this or `feature_set`, not both.
+#' @param norm_method    One of "zScore", "Sigmoid", "RobustSigmoid", "MinMax",
+#'                       "MaxAbs" (normaliseR::normalise()), applied per feature,
+#'                       across bouts.
+#' @param unit_int       Also rescale into the unit interval [0, 1] afterwards.
+#' @param low_dim_method One of "PCA", "tSNE", "ClassicalMDS", "KruskalMDS",
+#'                       "SammonMDS", "UMAP".
+#' @param na_removal     "feature" (default): drop any feature column with an
+#'                       NA, keeping every bout. "sample": keep every feature
+#'                       column, drop any bout with an NA.
+#' @param seed           Integer for set.seed(), used by the stochastic methods
+#'                       (tSNE, UMAP).
+#' @param verbose        Print progress / NA-removal messages.
+#' @param ...            Passed on to the underlying method: stats::prcomp(),
+#'                       Rtsne::Rtsne(), stats::cmdscale(), MASS::isoMDS(),
+#'                       MASS::sammon(), or umap::umap().
+#'
+#' @return An object of class "calc_projection", a list with:
+#'   Data           the `data` you passed in, unmodified
+#'   Meta           the non-feature (key/context) columns that survived NA
+#'                  removal, plus `..row_id..` (matches ProjectedData$id)
+#'   ModelData      the normalised, NA-handled feature matrix actually modelled
+#'   ProjectedData  tibble(id, .fitted1, .fitted2), one row per surviving bout
+#'   ModelFit       the raw fit object (prcomp / Rtsne / cmdscale / isoMDS /
+#'                  sammon / umap)
+#'   LowDimMethod   the `low_dim_method` used
+#' @examples
+#' calc_features(vultures_tsbl, c(acc_x, acc_y, acc_z), feature_set = "catch22") |>
+#'   project_features(norm_method = "RobustSigmoid", unit_int = TRUE,
+#'                    low_dim_method = "PCA") |>
+#'   plot()
+project_features <- function(
+  data,
+  feature_set = NULL,
+  cols = NULL,
+  norm_method = c("zScore", "Sigmoid", "RobustSigmoid", "MinMax", "MaxAbs"),
+  unit_int = FALSE,
+  low_dim_method = c(
+    "PCA",
+    "tSNE",
+    "ClassicalMDS",
+    "KruskalMDS",
+    "SammonMDS",
+    "UMAP"
+  ),
+  na_removal = c("feature", "sample"),
+  seed = 123,
+  verbose = TRUE,
+  ...
+) {
+  say <- function(...) if (verbose) rlang::inform(paste0(...))
 
-# #' Calculate bout-level features from a sensor tsibble
-# #'
-# #' @param data        A tsibble. Every key combination (e.g. id + bout) is one
-# #'                    bout and yields one row of features.
-# #' @param cols        Sensor streams to use, as tidyselect: `acc_x`,
-# #'                    `c(acc_x, acc_y, acc_z)`, `starts_with("acc_")`, ...
-# #' @param feature_set One or more of "catch22", "rabc_time1", "rabc_time2",
-# #'                    "rabc_freq".
-# #' @param catch24     Also compute catch24 (adds DN_Mean, DN_Spread_Std) when
-# #'                    catch22 is requested.
-# #' @param winlen_dba_s Rolling-mean window in SECONDS used to separate static from
-# #'                    dynamic acceleration (rabc_time1/2). Needs `fs`. Rounded to
-# #'                    an odd number of samples. Give this or `winlen_dba`.
-# #' @param winlen_dba  The same window in SAMPLES. Give this or `winlen_dba_s`.
-# #' @param fs          Sampling rate in Hz. Required for rabc_freq and for
-# #'                    `winlen_dba_s`.
-# #' @param acc_cols    Named character vector mapping axes to column names.
-# #'                    Change it if your axes are not called acc_x/acc_y/acc_z.
-# #' @param seed        Integer for set.seed(), or NULL to leave the RNG alone.
-# #' @param verbose     Print progress messages.
-# #'
-# #' @return A tibble with one row per bout (see file header for the layout).
-# #' @examples
+  if (!is.data.frame(data)) {
+    rlang::abort(
+      "`data` must be a tibble/data.frame -- the output of calc_features()."
+    )
+  }
+  norm_method <- match.arg(norm_method)
+  low_dim_method <- match.arg(low_dim_method)
+  na_removal <- match.arg(na_removal)
 
-# calc_features <- function(
-#   data,
-#   cols,
-#   feature_set = "catch22",
-#   catch24 = FALSE,
-#   winlen_dba_s = NULL,
-#   winlen_dba = NULL,
-#   fs = NULL,
-#   acc_cols = c(x = "acc_x", y = "acc_y", z = "acc_z"),
-#   seed = 123,
-#   verbose = TRUE
-# ) {
-#   say <- function(...) if (verbose) rlang::inform(paste0(...))
+  # ---- which columns are features, and which feature_set(s) do they belong to --
+  parts <- .split_feature_cols(names(data))
+  if (length(parts$feature) == 0) {
+    rlang::abort(
+      "No `<feature_set>__<stream>__<feature>` columns found. Is `data` the output of calc_features()?"
+    )
+  }
+  if (!is.null(feature_set) && !is.null(cols)) {
+    rlang::abort("Give either `feature_set` or `cols`, not both.")
+  }
+  if (!is.null(cols)) {
+    unknown <- setdiff(cols, parts$feature)
+    if (length(unknown)) {
+      rlang::abort(c(
+        paste0(
+          "`cols` not found among feature columns: ",
+          paste(unknown, collapse = ", ")
+        ),
+        i = "Feature columns are named <feature_set>__<stream>__<feature>."
+      ))
+    }
+    parts$info <- parts$info[parts$info$column %in% cols, ]
+    parts$feature <- cols
+  } else if (!is.null(feature_set)) {
+    available <- unique(parts$info$feature_set)
+    unknown <- setdiff(feature_set, available)
+    if (length(unknown)) {
+      rlang::abort(c(
+        paste0(
+          "`feature_set` not present in `data`: ",
+          paste(unknown, collapse = ", ")
+        ),
+        i = paste0("Available: ", paste(available, collapse = ", "))
+      ))
+    }
+    keep <- parts$info$feature_set %in% feature_set
+    parts$info <- parts$info[keep, ]
+    parts$feature <- parts$info$column
+  }
+  if (length(parts$feature) < 2) {
+    rlang::abort("Need at least 2 feature columns to project to 2 dimensions.")
+  }
 
-#   # ---- input checks ----------------------------------------------------------
-#   if (!tsibble::is_tsibble(data)) {
-#     rlang::abort("`data` must be a tsibble in the tidy sensor format.")
-#   }
-#   if (missing(cols)) {
-#     rlang::abort(c(
-#       "Say which sensor columns to use.",
-#       i = "e.g. `cols = c(acc_x, acc_y, acc_z)`."
-#     ))
-#   }
+  # ---- normalise every selected feature column in place; no reshape needed -----
+  meta <- tibble::as_tibble(data[parts$meta])
+  meta$..row_id.. <- as.character(seq_len(nrow(data)))
 
-#   feature_set <- unique(tolower(feature_set))
-#   unknown <- setdiff(feature_set, .feature_sets)
-#   if (length(unknown)) {
-#     rlang::abort(c(
-#       paste0("Unknown `feature_set`: ", paste(unknown, collapse = ", ")),
-#       i = paste0("Available: ", paste(.feature_sets, collapse = ", "))
-#     ))
-#   }
-#   if (all(c("rabc_time1", "rabc_time2") %in% feature_set)) {
-#     say(
-#       "rabc_time2 already contains every rabc_time1 feature; computing rabc_time2 only."
-#     )
-#     feature_set <- setdiff(feature_set, "rabc_time1")
-#   }
-#   uses_time <- any(c("rabc_time1", "rabc_time2") %in% feature_set)
-#   uses_freq <- "rabc_freq" %in% feature_set
-#   uses_rabc <- uses_time || uses_freq
+  wide <- as.data.frame(data[parts$feature])
+  wide[] <- lapply(wide, function(v) {
+    normaliseR::normalise(
+      as.numeric(v),
+      norm_method = norm_method,
+      unit_int = unit_int
+    )
+  })
+  rownames(wide) <- meta$..row_id..
 
-#   keys <- tsibble::key_vars(data)
-#   idx <- tsibble::index_var(data)
-#   if (length(keys) == 0) {
-#     rlang::abort(c(
-#       "`data` needs key column(s) that identify each bout.",
-#       i = "e.g. `as_tsibble(x, key = c(id, bout), index = sample_in_bout)`."
-#     ))
-#   }
-#   df <- tibble::as_tibble(data)
+  n_features <- ncol(wide)
+  n_samples <- nrow(wide)
 
-#   sig <- names(tidyselect::eval_select(rlang::enquo(cols), df))
-#   if (length(sig) == 0) {
-#     rlang::abort("`cols` selected no columns.")
-#   }
-#   if (any(sig %in% c(keys, idx))) {
-#     rlang::abort("`cols` must be sensor columns, not key or index columns.")
-#   }
-#   bad_type <- sig[!vapply(df[sig], is.numeric, logical(1))]
-#   if (length(bad_type)) {
-#     rlang::abort(paste0(
-#       "These `cols` are not numeric: ",
-#       paste(bad_type, collapse = ", ")
-#     ))
-#   }
+  if (na_removal == "feature") {
+    keep_col <- vapply(wide, function(v) !anyNA(v), logical(1))
+    wide <- wide[, keep_col, drop = FALSE]
+  } else {
+    keep_row <- stats::complete.cases(wide)
+    wide <- wide[keep_row, , drop = FALSE]
+    meta <- meta[keep_row, , drop = FALSE]
+  }
 
-#   if (isTRUE(catch24) && !"catch22" %in% feature_set) {
-#     rlang::warn(
-#       "`catch24 = TRUE` is ignored because \"catch22\" is not in `feature_set`."
-#     )
-#   }
+  n_features_omitted <- n_features - ncol(wide)
+  n_samples_omitted <- n_samples - nrow(wide)
+  if (n_features_omitted > 0) {
+    say(n_features_omitted, " feature(s) omitted due to NAs.")
+  }
+  if (n_samples_omitted > 0) {
+    say(n_samples_omitted, " bout(s) omitted due to NAs.")
+  }
+  if (ncol(wide) < 2) {
+    rlang::abort(
+      "Fewer than 2 features survive NA removal; try `na_removal = \"sample\"`, or a different `feature_set`."
+    )
+  }
+  if (nrow(wide) < 3) {
+    rlang::abort("Fewer than 3 bouts survive NA removal.")
+  }
 
-#   # ---- sampling rate and dynamic-acceleration window (validated before any messages)
-#   fs_ok <- !is.null(fs) &&
-#     is.numeric(fs) &&
-#     length(fs) == 1 &&
-#     !is.na(fs) &&
-#     fs > 0
-#   if (uses_freq && !fs_ok) {
-#     rlang::abort(
-#       "rabc_freq needs `fs`, the sampling rate in Hz (e.g. `fs = 20`)."
-#     )
-#   }
-#   if (!is.null(fs) && !fs_ok) {
-#     rlang::abort("`fs` must be a single positive number (sampling rate in Hz).")
-#   }
-#   win_requested <- winlen_dba_s
-#   if (uses_time) {
-#     winlen_dba <- .resolve_winlen(winlen_dba, winlen_dba_s, fs, fs_ok)
-#   } else if (!is.null(winlen_dba) || !is.null(winlen_dba_s)) {
-#     say(
-#       "`winlen_dba` / `winlen_dba_s` are ignored: no rabc_time set requested."
-#     )
-#   }
+  # ---- dimension reduction -------------------------------------------------------
+  set.seed(seed)
+  ids <- rownames(wide)
 
-#   # ---- accelerometer axes for the rabc sets ------------------------------------
-#   axes <- NULL
-#   if (uses_rabc) {
-#     axes <- .resolve_axes(sig, acc_cols)
-#     used <- names(axes)
-#     if (length(axes) < 3 && uses_time) {
-#       pair_txt <- if (length(axes) == 2) {
-#         paste0("PDBA_", paste(used, collapse = ""))
-#       } else {
-#         paste0("PDBA_", used)
-#       }
-#       say(
-#         "Axes available: ",
-#         paste(unname(axes), collapse = ", "),
-#         ". ODBA is replaced by ",
-#         pair_txt,
-#         "; cross-axis features are limited to the axes present."
-#       )
-#     }
-#     ignored <- setdiff(sig, axes)
-#     if (length(ignored) && !"catch22" %in% feature_set) {
-#       say(
-#         "rabc sets use accelerometer axes only; ignoring: ",
-#         paste(ignored, collapse = ", ")
-#       )
-#     }
-#   }
-#   if (!is.null(seed)) {
-#     set.seed(seed)
-#   }
+  if (low_dim_method == "PCA") {
+    fit <- stats::prcomp(wide, center = FALSE, scale. = FALSE, ...)
+    projected <- tibble::tibble(
+      id = ids,
+      .fitted1 = fit$x[, 1],
+      .fitted2 = fit$x[, 2]
+    )
+  } else if (low_dim_method == "tSNE") {
+    fit <- Rtsne::Rtsne(
+      as.matrix(wide),
+      dims = 2,
+      check_duplicates = FALSE,
+      ...
+    )
+    projected <- tibble::tibble(
+      id = ids,
+      .fitted1 = fit$Y[, 1],
+      .fitted2 = fit$Y[, 2]
+    )
+  } else if (low_dim_method == "ClassicalMDS") {
+    fit <- stats::cmdscale(stats::dist(wide), k = 2, ...)
+    projected <- tibble::tibble(
+      id = ids,
+      .fitted1 = fit[, 1],
+      .fitted2 = fit[, 2]
+    )
+  } else if (low_dim_method == "KruskalMDS") {
+    fit <- MASS::isoMDS(stats::dist(wide), k = 2, ...)
+    projected <- tibble::tibble(
+      id = ids,
+      .fitted1 = fit$points[, 1],
+      .fitted2 = fit$points[, 2]
+    )
+  } else if (low_dim_method == "SammonMDS") {
+    fit <- MASS::sammon(stats::dist(wide), k = 2, ...)
+    projected <- tibble::tibble(
+      id = ids,
+      .fitted1 = fit$points[, 1],
+      .fitted2 = fit$points[, 2]
+    )
+  } else {
+    fit <- umap::umap(as.matrix(wide), n_components = 2, ...)
+    projected <- tibble::tibble(
+      id = ids,
+      .fitted1 = fit$layout[, 1],
+      .fitted2 = fit$layout[, 2]
+    )
+  }
 
-#   # ---- bout structure ----------------------------------------------------------
-#   df <- dplyr::arrange(df, dplyr::across(dplyr::all_of(c(keys, idx))))
-#   gid <- vctrs::vec_group_id(df[keys]) # consecutive after the sort above
-#   n_bouts <- max(gid)
-#   first_idx <- match(seq_len(n_bouts), gid)
+  structure(
+    list(
+      Data = data,
+      Meta = meta,
+      ModelData = wide,
+      ProjectedData = projected,
+      ModelFit = fit,
+      LowDimMethod = low_dim_method
+    ),
+    class = "calc_projection"
+  )
+}
 
-#   need <- unique(c(
-#     if ("catch22" %in% feature_set) sig,
-#     if (uses_rabc) unname(axes)
-#   ))
-#   streams <- lapply(stats::setNames(need, need), function(col) {
-#     unname(split(df[[col]], gid))
-#   })
-#   bad <- lapply(streams, function(s) {
-#     vapply(s, function(v) any(!is.finite(v)), logical(1))
-#   })
+#' Plot a calc_projection object
+#'
+#' @param x            A "calc_projection" object from project_features().
+#' @param colour_by    Name of a column to colour points by: a column from
+#'                     `x$Meta` (context, e.g. "label", "id" -- discrete
+#'                     palette), OR the name of any column in `x$Data` (e.g. a
+#'                     feature, whether or not it was used in this particular
+#'                     projection -- continuous gradient). Defaults to "label"
+#'                     if present, else no colour.
+#' @param show_covariance Draw a covariance ellipse per colour group. Ignored
+#'                     if `colour_by` is NULL or continuous (a feature value).
+#' @param ...          Unused; present for S3 consistency.
+#' @return A ggplot object.
+#' @export
+plot.calc_projection <- function(
+  x,
+  colour_by = NULL,
+  show_covariance = TRUE,
+  ...
+) {
+  if (!inherits(x, "calc_projection")) {
+    rlang::abort(
+      "`x` must be a calc_projection object (see project_features())."
+    )
+  }
 
-#   if (uses_time) {
-#     n_per_bout <- lengths(streams[[unname(axes[1])]])
-#     say(.window_note(
-#       winlen_dba,
-#       win_requested,
-#       if (fs_ok) fs,
-#       stats::median(n_per_bout)
-#     ))
-#     shortest <- min(n_per_bout)
-#     if (shortest < winlen_dba) {
-#       rlang::warn(paste0(
-#         "Some bouts have fewer samples (",
-#         shortest,
-#         ") than the window (",
-#         winlen_dba,
-#         "); for those bouts the rolling-window features (ODBA/PDBA",
-#         if ("rabc_time2" %in% feature_set) ", varsba, vardba, maxdba" else "",
-#         ") will be NA."
-#       ))
-#     }
-#   }
+  fits <- x$ProjectedData
+  meta_cols <- setdiff(names(x$Meta), "..row_id..")
 
-#   # ---- key + context columns ---------------------------------------------------
-#   ctx_candidates <- setdiff(names(df), c(keys, idx, sig))
-#   is_const <- function(col) {
-#     v <- df[[col]]
-#     first <- v[first_idx][gid]
-#     all(((v == first) %in% TRUE) | (is.na(v) & is.na(first)))
-#   }
-#   const <- vapply(ctx_candidates, is_const, logical(1))
-#   varying <- ctx_candidates[!const]
-#   is_num <- vapply(df[ctx_candidates], is.numeric, logical(1))
-#   vary_num <- varying[is_num[varying]]
-#   vary_oth <- setdiff(varying, vary_num)
-#   if (length(vary_oth)) {
-#     rlang::warn(paste0(
-#       "Dropped context column(s) that change within a bout: ",
-#       paste(vary_oth, collapse = ", "),
-#       ". Bout-level values would be ambiguous."
-#     ))
-#   }
-#   if (length(vary_num)) {
-#     say(
-#       "Dropped numeric column(s) that vary within bouts (treated as unselected sensor streams): ",
-#       paste(vary_num, collapse = ", ")
-#     )
-#   }
-#   bout_tbl <- df[first_idx, c(keys, ctx_candidates[const]), drop = FALSE]
+  if (is.null(colour_by) && "label" %in% meta_cols) {
+    colour_by <- "label"
+  }
 
-#   say(
-#     "Calculating features for ",
-#     format(n_bouts, big.mark = ","),
-#     " bouts: ",
-#     paste(feature_set, collapse = ", ")
-#   )
+  is_continuous <- FALSE
+  if (!is.null(colour_by)) {
+    if (colour_by %in% meta_cols) {
+      grp <- stats::setNames(
+        x$Meta[c("..row_id..", colour_by)],
+        c("id", "group_id")
+      )
+      fits <- dplyr::inner_join(fits, grp, by = "id")
+      fits$group_id <- factor(fits$group_id)
+    } else if (colour_by %in% names(x$Data)) {
+      row_idx <- as.integer(x$Meta$..row_id..)
+      val <- x$Data[[colour_by]][row_idx]
+      fits$group_id <- val[match(fits$id, x$Meta$..row_id..)]
+      is_continuous <- is.numeric(fits$group_id)
+      if (!is_continuous) fits$group_id <- factor(fits$group_id)
+    } else {
+      rlang::abort(c(
+        paste0("`colour_by` not found: ", colour_by),
+        i = paste0("Context columns: ", paste(meta_cols, collapse = ", ")),
+        i = "Or any column name from the original data passed to project_features() (e.g. a feature, for a continuous gradient)."
+      ))
+    }
+  }
 
-#   # ---- feature sets ------------------------------------------------------------
-#   results <- list()
-#   if ("catch22" %in% feature_set) {
-#     results$catch22 <- .run_catch22(streams[sig], bad[sig], catch24, say)
-#   }
-#   if ("rabc_time1" %in% feature_set) {
-#     results$rabc_time1 <- .run_rabc_time(
-#       streams,
-#       bad,
-#       axes,
-#       winlen_dba,
-#       expanded = FALSE,
-#       set = "rabc_time1",
-#       say = say
-#     )
-#   }
-#   if ("rabc_time2" %in% feature_set) {
-#     results$rabc_time2 <- .run_rabc_time(
-#       streams,
-#       bad,
-#       axes,
-#       winlen_dba,
-#       expanded = TRUE,
-#       set = "rabc_time2",
-#       say = say
-#     )
-#   }
-#   if (uses_freq) {
-#     results$rabc_freq <- .run_rabc_freq(streams, bad, axes, fs, say)
-#   }
-#   results <- results[feature_set] # keep the order the user asked for
+  if (x$LowDimMethod == "PCA") {
+    pct <- round(100 * x$ModelFit$sdev^2 / sum(x$ModelFit$sdev^2))
+    xlab <- paste0("PC1 (", pct[1], "%)")
+    ylab <- paste0("PC2 (", pct[2], "%)")
+  } else {
+    xlab <- "Dimension 1"
+    ylab <- "Dimension 2"
+  }
 
-#   dplyr::bind_cols(c(list(bout_tbl), unname(results)))
-# }
+  pt_size <- if (nrow(fits) > 200) 1.5 else 2.25
+  p <- ggplot2::ggplot(
+    fits,
+    ggplot2::aes(x = .data$.fitted1, y = .data$.fitted2)
+  )
 
-# #' Pivot the wide feature tibble into a long, theft-style layout
-# #'
-# #' Splits `<feature_set>__<stream>__<feature>` column names back into three
-# #' columns. Every other column (keys, context) is kept as an identifier.
-# #' @param x Output of calc_features().
-# feature_long <- function(x) {
-#   n_delim <- lengths(regmatches(
-#     names(x),
-#     gregexpr("__", names(x), fixed = TRUE)
-#   ))
-#   feat <- names(x)[n_delim == 2]
-#   if (length(feat) == 0) {
-#     rlang::abort("No `<feature_set>__<stream>__<feature>` columns found.")
-#   }
-#   tidyr::pivot_longer(
-#     x,
-#     cols = tidyselect::all_of(feat),
-#     names_to = c("feature_set", "stream", "feature"),
-#     names_sep = "__",
-#     values_to = "value"
-#   )
-# }
+  if (!is.null(colour_by) && is_continuous) {
+    p <- p +
+      ggplot2::geom_point(
+        ggplot2::aes(colour = .data$group_id),
+        size = pt_size
+      ) +
+      ggplot2::scale_colour_viridis_c() +
+      ggplot2::labs(colour = colour_by)
+  } else if (!is.null(colour_by)) {
+    n_levels <- nlevels(fits$group_id)
+    use_viridis <- n_levels > 8 # RColorBrewer's Dark2 supports at most 8 distinct colours;
+    # beyond that it silently assigns NA, and ggplot2 then drops
+    # those points entirely -- viridis scales to any n instead.
+    if (isTRUE(show_covariance)) {
+      p <- p +
+        ggplot2::stat_ellipse(
+          ggplot2::aes(fill = .data$group_id),
+          geom = "polygon",
+          alpha = 0.2
+        ) +
+        ggplot2::guides(fill = "none") +
+        (if (use_viridis) {
+          ggplot2::scale_fill_viridis_d()
+        } else {
+          ggplot2::scale_fill_brewer(palette = "Dark2")
+        })
+    }
+    p <- p +
+      ggplot2::geom_point(
+        ggplot2::aes(colour = .data$group_id),
+        size = pt_size
+      ) +
+      (if (use_viridis) {
+        ggplot2::scale_colour_viridis_d()
+      } else {
+        ggplot2::scale_colour_brewer(palette = "Dark2")
+      }) +
+      ggplot2::labs(colour = colour_by)
+  } else {
+    p <- p + ggplot2::geom_point(size = pt_size, colour = "black")
+  }
 
-# # ---- runners ---------------------------------------------------------------------
+  p +
+    ggplot2::labs(
+      title = "Low-dimensional projection of bouts",
+      subtitle = paste0("Dimension reduction: ", x$LowDimMethod),
+      x = xlab,
+      y = ylab
+    ) +
+    ggplot2::theme_bw() +
+    ggplot2::theme(
+      panel.grid.minor = ggplot2::element_blank(),
+      legend.position = "bottom"
+    )
+}
 
-# .run_catch22 <- function(streams, bad, catch24, say) {
-#   fn <- function(v) .catch22_vec(v, catch24)
-#   tmpl <- names(fn(sin(seq_len(100))))
+# explore_features - interactive shiny app wrapping project_features and plot.calc_projection()
+# explore_features.R -----------------------------------------------------------
+# Interactive Shiny app wrapping project_features() / plot.calc_projection(),
+# inspired by rabc::plot_UMAP() but adapted to calc_features()'s single wide
+# tibble and project_features()'s full range of low_dim_method options.
+#
+# Requires: shiny, bslib, plus everything project_features.R requires. Source
+# project_features.R (and calculate_features.R, which it needs) first.
+#
+# Structure (one page, not rabc's three tabs -- merged into one control panel):
+#   Sidebar -- feature sets (checkboxes, populated from the feature_set
+#     prefixes actually present in `data`'s column names), an optional
+#     fine-tune multi-select for individual features (grouped by set), then
+#     normalisation / NA-handling / low_dim_method controls, and a "Project"
+#     button. Colour-by and the covariance-ellipse toggle sit below the
+#     button: they restyle the CURRENT projection instantly (cheap), while
+#     everything above the button requires a fresh Project click, since
+#     re-running tSNE/UMAP on every checkbox tick would be slow and annoying.
+#   Main panel -- the plot, reusing plot.calc_projection() as-is (no
+#     duplicated plotting code), plus a small summary of the current
+#     settings and any NA-removal messages from project_features().
+#
+# "Colour by" lists BOTH context columns (id, label, attachment, segment, ...
+#   -- discrete palette) and every feature column in the FULL original
+#   dataset (continuous gradient), not just whichever ones are currently
+#   toggled on for the projection -- project_features() always keeps `Data`
+#   as the untouched original tibble for exactly this: seeing how a feature
+#   maps onto a projection built from a DIFFERENT set of features.
+#
+# Feature/hyperparameter scope for v1: per-method hyperparameters (UMAP's
+# n_neighbors, tSNE's perplexity, ...) are deliberately not exposed yet --
+# each method's defaults are used via project_features()'s `...`. Add a
+# conditionalPanel per method once the feature-selection workflow is settled.
 
-#   per_stream <- lapply(names(streams), function(col) {
-#     S <- streams[[col]]
-#     mat <- .fill_matrix(
-#       seq_along(S),
-#       which(!bad[[col]]),
-#       function(b) fn(S[[b]]),
-#       tmpl
-#     )
-#     colnames(mat) <- paste0("catch22__", col, "__", tmpl)
-#     .report_na(mat, paste0("catch22 (", col, ")"), say)
-#     tibble::as_tibble(mat)
-#   })
-#   dplyr::bind_cols(per_stream)
-# }
+#' Launch the feature projection explorer
+#'
+#' @param data Output of calc_features(): one row per bout, feature columns
+#'   named <feature_set>__<stream>__<feature>.
+#' @return A shiny.appobj (call the function to launch it).
+#' @examples
+#' calc_features(vultures_tsbl, c(acc_x, acc_y, acc_z),
+#'              feature_set = c("catch22", "rabc_time2")) |>
+#'   explore_features()
+explore_features <- function(data) {
+  if (
+    !exists("project_features", mode = "function") ||
+      !exists(".split_feature_cols", mode = "function")
+  ) {
+    rlang::abort(
+      "Source project_features.R first (this builds on project_features() and plot.calc_projection())."
+    )
+  }
+  if (!is.data.frame(data)) {
+    rlang::abort(
+      "`data` must be a tibble/data.frame -- the output of calc_features()."
+    )
+  }
 
-# .run_rabc_time <- function(streams, bad, axes, winlen, expanded, set, say) {
-#   n <- length(streams[[unname(axes[1])]])
-#   fn <- function(b) {
-#     ax <- lapply(axes, function(col) streams[[col]][[b]])
-#     .rabc_time_bout(ax, axes, winlen, expanded)
-#   }
-#   dummy <- lapply(axes, function(.) sin(seq_len(max(2 * winlen, 20)) * 0.7))
-#   tmpl <- names(.rabc_time_bout(dummy, axes, winlen, expanded))
+  parts <- .split_feature_cols(names(data))
+  if (length(parts$feature) == 0) {
+    rlang::abort(
+      "No `<feature_set>__<stream>__<feature>` columns found. Is `data` the output of calc_features()?"
+    )
+  }
 
-#   bad_any <- Reduce(`|`, bad[unname(axes)])
-#   mat <- .fill_matrix(seq_len(n), which(!bad_any), fn, tmpl)
-#   colnames(mat) <- paste0(set, "__", tmpl)
-#   .report_na(mat, set, say)
-#   tibble::as_tibble(mat)
-# }
+  feature_sets <- sort(unique(parts$info$feature_set))
+  meta_cols <- parts$meta
+  by_set <- split(parts$info$column, parts$info$feature_set)[feature_sets]
+  colour_choices <- list(Context = meta_cols, Features = sort(parts$feature))
+  default_colour <- if ("label" %in% meta_cols) "label" else meta_cols[1]
 
-# .run_rabc_freq <- function(streams, bad, axes, fs, say) {
-#   n <- length(streams[[unname(axes[1])]])
-#   fn <- function(b) {
-#     ax <- lapply(axes, function(col) streams[[col]][[b]])
-#     .rabc_freq_bout(ax, axes, fs)
-#   }
-#   dummy <- lapply(axes, function(.) sin(seq_len(40) * 0.7))
-#   tmpl <- names(.rabc_freq_bout(dummy, axes, fs))
+  ui <- bslib::page_sidebar(
+    title = "Feature projection explorer",
+    sidebar = bslib::sidebar(
+      width = 340,
+      shiny::checkboxGroupInput(
+        "feature_sets",
+        "Feature sets",
+        choices = feature_sets,
+        selected = feature_sets
+      ),
+      shiny::checkboxInput(
+        "fine_tune",
+        "Fine-tune individual features",
+        value = FALSE
+      ),
+      shiny::conditionalPanel(
+        "input.fine_tune",
+        shiny::selectizeInput(
+          "features_custom",
+          NULL,
+          choices = by_set,
+          multiple = TRUE,
+          options = list(
+            placeholder = "Defaults to all features in the checked sets above"
+          )
+        )
+      ),
+      shiny::hr(),
+      shiny::selectInput(
+        "norm_method",
+        "Normalisation",
+        choices = c("zScore", "Sigmoid", "RobustSigmoid", "MinMax", "MaxAbs")
+      ),
+      shiny::checkboxInput(
+        "unit_int",
+        "Rescale to [0, 1] afterwards",
+        value = FALSE
+      ),
+      shiny::selectInput(
+        "na_removal",
+        "NA handling",
+        choices = c(
+          "Drop features with any NA" = "feature",
+          "Drop bouts with any NA" = "sample"
+        )
+      ),
+      shiny::selectInput(
+        "low_dim_method",
+        "Method",
+        choices = c(
+          "PCA",
+          "tSNE",
+          "ClassicalMDS",
+          "KruskalMDS",
+          "SammonMDS",
+          "UMAP"
+        )
+      ),
+      shiny::hr(),
+      shiny::actionButton("go", "Project", class = "btn-primary"),
+      shiny::hr(),
+      shiny::selectInput(
+        "colour_by",
+        "Colour by",
+        choices = colour_choices,
+        selected = default_colour
+      ),
+      shiny::checkboxInput(
+        "show_covariance",
+        "Show covariance ellipse",
+        value = TRUE
+      )
+    ),
+    shiny::uiOutput("summary"),
+    shiny::plotOutput("proj_plot", height = "600px")
+  )
 
-#   bad_any <- Reduce(`|`, bad[unname(axes)])
-#   mat <- .fill_matrix(seq_len(n), which(!bad_any), fn, tmpl)
-#   colnames(mat) <- paste0("rabc_freq__", tmpl)
-#   .report_na(mat, "rabc_freq", say)
-#   tibble::as_tibble(mat)
-# }
+  server <- function(input, output, session) {
+    chosen_cols <- shiny::reactive({
+      if (isTRUE(input$fine_tune) && length(input$features_custom) > 0) {
+        input$features_custom
+      } else {
+        parts$info$column[parts$info$feature_set %in% input$feature_sets]
+      }
+    })
 
-# # ---- per-bout feature functions ----------------------------------------------------
+    projection <- shiny::eventReactive(input$go, {
+      cols <- chosen_cols()
+      shiny::validate(shiny::need(
+        length(cols) >= 2,
+        "Select at least 2 features to project."
+      ))
 
-# .catch22_vec <- function(v, catch24) {
-#   o <- Rcatch22::catch22_all(v, catch24 = catch24)
-#   stats::setNames(o$values, o$names)
-# }
+      msgs <- character()
+      proj <- tryCatch(
+        withCallingHandlers(
+          project_features(
+            data,
+            cols = cols,
+            norm_method = input$norm_method,
+            unit_int = input$unit_int,
+            low_dim_method = input$low_dim_method,
+            na_removal = input$na_removal,
+            verbose = TRUE
+          ),
+          message = function(m) {
+            msgs <<- c(msgs, trimws(conditionMessage(m)))
+            invokeRestart("muffleMessage")
+          }
+        ),
+        error = function(e) {
+          shiny::validate(shiny::need(FALSE, conditionMessage(e)))
+        }
+      )
+      list(proj = proj, messages = msgs)
+    })
 
-# # Rolling mean used to split static (sba) from dynamic (dba) acceleration.
-# .roll_mean <- function(v, w) {
-#   if (length(v) < w) {
-#     return(rep(NA_real_, length(v)))
-#   }
-#   zoo::rollapply(v, width = w, FUN = mean, fill = NA, align = "center")
-# }
+    output$proj_plot <- shiny::renderPlot(
+      {
+        shiny::req(projection())
+        plot(
+          projection()$proj,
+          colour_by = input$colour_by,
+          show_covariance = input$show_covariance
+        )
+      },
+      height = function() session$clientData$output_proj_plot_width * 0.75
+    )
 
-# # ax:   named list of numeric vectors for the axes present (names in x, y, z)
-# # cmap: named character vector mapping those axes to column names
-# .rabc_time_bout <- function(ax, cmap, winlen, expanded) {
-#   ns <- names(ax)
-#   st <- unname(cmap[ns])
-#   per <- function(f) unname(vapply(ax, f, numeric(1)))
-#   nm <- function(vals, streams, feature) {
-#     if (length(vals) == 0) {
-#       return(numeric(0))
-#     }
-#     stats::setNames(unname(vals), paste0(streams, "__", feature))
-#   }
+    output$summary <- shiny::renderUI({
+      shiny::req(projection())
+      p <- projection()$proj
+      shiny::tagList(
+        shiny::p(
+          shiny::strong(paste0(
+            nrow(p$ModelData),
+            " bouts \u00d7 ",
+            ncol(p$ModelData),
+            " features"
+          )),
+          " -- ",
+          p$LowDimMethod,
+          ", ",
+          input$norm_method,
+          if (isTRUE(input$unit_int)) " (rescaled to [0, 1])" else ""
+        ),
+        if (length(projection()$messages)) {
+          shiny::tags$ul(lapply(projection()$messages, shiny::tags$li))
+        }
+      )
+    })
+  }
 
-#   sba <- lapply(ax, .roll_mean, w = winlen)
-#   dba <- Map(function(v, s) abs(v - s), ax, sba)
-
-#   # ODBA with all three axes; PDBA_<axes> when only some are available
-#   dyn <- mean(Reduce(`+`, dba), na.rm = TRUE)
-#   dyn_name <- if (length(ns) == 3) {
-#     "ODBA"
-#   } else {
-#     paste0("PDBA_", paste(ns, collapse = ""))
-#   }
-#   dyn_stream <- paste(st, collapse = "_")
-
-#   mx <- per(max)
-#   mn <- per(min)
-#   out <- c(
-#     nm(per(mean), st, "mean"),
-#     nm(per(stats::var), st, "variance"),
-#     nm(per(stats::sd), st, "sd"),
-#     nm(mx, st, "max"),
-#     nm(mn, st, "min"),
-#     nm(mx - mn, st, "range"),
-#     nm(dyn, dyn_stream, dyn_name)
-#   )
-#   if (!expanded) {
-#     return(out)
-#   }
-
-#   # cross-axis pairs, direction as in the original code: xy, yz, xz
-#   prs <- Filter(
-#     function(p) all(p %in% ns),
-#     list(c("x", "y"), c("y", "z"), c("x", "z"))
-#   )
-#   ps <- vapply(prs, function(p) paste(cmap[p], collapse = "_"), character(1))
-#   pair <- function(f) {
-#     vapply(prs, function(p) f(ax[[p[1]]], ax[[p[2]]]), numeric(1))
-#   }
-
-#   suppressWarnings(c(
-#     out,
-#     nm(per(function(v) sqrt(sum(v^2))), st, "norm"),
-#     nm(pair(stats::cov), ps, "cov"),
-#     nm(pair(stats::cor), ps, "cor"),
-#     nm(pair(function(a, b) mean(a - b)), ps, "meandiff"),
-#     nm(pair(function(a, b) stats::sd(a - b)), ps, "sddiff"),
-#     nm(vapply(sba, stats::var, numeric(1), na.rm = TRUE), st, "varsba"),
-#     nm(vapply(dba, stats::var, numeric(1), na.rm = TRUE), st, "vardba"),
-#     nm(vapply(dba, max, numeric(1), na.rm = TRUE), st, "maxdba")
-#   ))
-# }
-
-# # Dominant frequency bin, its amplitude, and a spectral-entropy term for one
-# # detrended series. Follows rabc::max_freq_amp; ties take the first maximum.
-# .max_freq_amp <- function(v) {
-#   n <- length(v)
-#   half <- floor(n / 2)
-#   if (half < 1) {
-#     return(rep(NA_real_, 3))
-#   }
-#   freq <- abs(stats::fft(stats::lm(as.numeric(v) ~ seq_len(n))$residuals))
-#   ind <- which.max(freq[seq_len(half)])
-#   c(ind, freq[ind], entropy::entropy(freq[seq_len(half)])^2 / half)
-# }
-
-# .rabc_freq_bout <- function(ax, cmap, fs) {
-#   st <- unname(cmap[names(ax)])
-#   res <- suppressWarnings(vapply(ax, .max_freq_amp, numeric(3)))
-#   res <- matrix(res, nrow = 3)
-#   fi <- fs / length(ax[[1]]) # as in rabc: frequency = bin * fs / n
-#   c(
-#     stats::setNames(res[1, ] * fi, paste0(st, "__freqmain")),
-#     stats::setNames(res[2, ], paste0(st, "__freqamp")),
-#     stats::setNames(res[3, ], paste0(st, "__entropy"))
-#   )
-# }
-
-# # ---- helpers -------------------------------------------------------------------
-
-# # Resolve the dynamic-acceleration window to a number of samples.
-# .resolve_winlen <- function(w, w_s, fs, fs_ok) {
-#   if (!is.null(w) && !is.null(w_s)) {
-#     rlang::abort(
-#       "Give either `winlen_dba_s` (seconds) or `winlen_dba` (samples), not both."
-#     )
-#   }
-#   if (is.null(w) && is.null(w_s)) {
-#     rlang::abort(c(
-#       "The rabc_time sets need a window for the static-acceleration estimate.",
-#       i = "Set it in seconds (needs `fs`): `winlen_dba_s = 1, fs = 20`.",
-#       i = "Or in samples: `winlen_dba = 21`."
-#     ))
-#   }
-#   if (!is.null(w_s)) {
-#     if (!is.numeric(w_s) || length(w_s) != 1 || is.na(w_s) || w_s <= 0) {
-#       rlang::abort(
-#         "`winlen_dba_s` must be a single positive number of seconds."
-#       )
-#     }
-#     if (!fs_ok) {
-#       rlang::abort(
-#         "`winlen_dba_s` needs `fs`, the sampling rate in Hz (e.g. `fs = 20`)."
-#       )
-#     }
-#     n <- 2 * floor(w_s * fs / 2 + 1e-9) + 1 # odd, so the window centres on a sample
-#     if (n < 3) {
-#       rlang::abort(paste0(
-#         w_s,
-#         " s at ",
-#         fs,
-#         " Hz is under 3 samples; use a longer `winlen_dba_s`."
-#       ))
-#     }
-#     return(as.integer(n))
-#   }
-#   if (!is.numeric(w) || length(w) != 1 || is.na(w) || w < 2 || w != round(w)) {
-#     rlang::abort(
-#       "`winlen_dba` must be a whole number of samples >= 2 (e.g. `winlen_dba = 21`)."
-#     )
-#   }
-#   as.integer(w)
-# }
-
-# # One-line description of the resolved window and its edge cost.
-# .window_note <- function(n, requested_s, fs, median_len) {
-#   win <- if (is.null(fs)) {
-#     paste0(n, " samples")
-#   } else {
-#     paste0(
-#       n,
-#       " samples (",
-#       format(round(n / fs, 2), nsmall = 2),
-#       " s at ",
-#       fs,
-#       " Hz",
-#       if (!is.null(requested_s)) paste0("; requested ", requested_s, " s"),
-#       ")"
-#     )
-#   }
-#   lost <- min(1, (n - 1) / median_len)
-#   paste0(
-#     "rabc_time window: ",
-#     win,
-#     ". Edge NAs remove ",
-#     round(100 * lost),
-#     "% of a median-length bout (",
-#     median_len,
-#     " samples)."
-#   )
-# }
-
-# # Bouts x features matrix; rows not in `ok` stay NA; non-finite results -> NA.
-# .fill_matrix <- function(items, ok, fn, nms) {
-#   mat <- matrix(NA_real_, nrow = length(items), ncol = length(nms))
-#   if (length(ok)) {
-#     mat[ok, ] <- do.call(rbind, lapply(items[ok], fn))
-#   }
-#   mat[!is.finite(mat)] <- NA_real_
-#   mat
-# }
-
-# .report_na <- function(mat, label, say) {
-#   n_na <- sum(!stats::complete.cases(mat))
-#   if (n_na > 0) {
-#     say(
-#       label,
-#       ": ",
-#       format(n_na, big.mark = ","),
-#       " of ",
-#       format(nrow(mat), big.mark = ","),
-#       " bouts have at least one NA feature (missing/non-finite input or an undefined feature)."
-#     )
-#   }
-#   invisible(n_na)
-# }
-
-# # Which of the requested axis columns are among the selected streams?
-# .resolve_axes <- function(sig, acc_cols) {
-#   if (is.null(names(acc_cols)) || !all(names(acc_cols) %in% c("x", "y", "z"))) {
-#     rlang::abort(
-#       "`acc_cols` must be a named character vector with names from x, y, z."
-#     )
-#   }
-#   present <- acc_cols[acc_cols %in% sig]
-#   if (length(present) == 0) {
-#     rlang::abort(c(
-#       "The rabc feature sets need at least one accelerometer axis among `cols`.",
-#       i = paste0(
-#         "Looked for: ",
-#         paste(acc_cols, collapse = ", "),
-#         " (change `acc_cols` if yours are named differently)."
-#       ),
-#       i = paste0("Selected: ", paste(sig, collapse = ", "))
-#     ))
-#   }
-#   present[intersect(c("x", "y", "z"), names(present))]
-# }
+  shiny::shinyApp(ui, server)
+}
