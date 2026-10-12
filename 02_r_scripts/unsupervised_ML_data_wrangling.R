@@ -25,6 +25,10 @@ renv::install("YuHuiDeakin/rabc")
 renv::install("theft")
 renv::install("theftdlc")
 
+# stats
+renv::install("diptest")
+renv::install("RANN")
+
 # load packages
 library(tidyverse)
 library(here)
@@ -42,6 +46,10 @@ library(rabc)
 library(theft)
 library(theftdlc)
 
+# stats
+library(diptest)
+library(RANN)
+
 
 # save packages to lockfile
 renv::snapshot()
@@ -58,7 +66,8 @@ usethis::use_blank_slate()
 # usethis::use_github() # use this code to create GitHub repo, but I already did this before manually
 
 # load helper functions
-source("02_r_scripts/utils.R")
+# source("02_r_scripts/utils.R")
+source("02_r_scripts/utils_2.R") # new versions to accomodate expanded feature sets
 
 # ensure variables don't save between sessions
 usethis::use_blank_slate()
@@ -247,72 +256,128 @@ plot_signal(
   fs = 20
 )
 
+# specify sensor roles for given sensor axes ---
+# which ACC axes correspond to sway, surge and heave?
+vulture_sensors <- tibble::tribble(
+  ~sensor , ~type           , ~column , ~role   , ~sign ,
+  "acc"   , "accelerometer" , "acc_x" , "sway"  ,     1 ,
+  "acc"   , "accelerometer" , "acc_y" , "surge" ,     1 ,
+  "acc"   , "accelerometer" , "acc_z" , "heave" ,     1
+)
+
 # feature calculation -----
 tic()
 vulture_features <- calc_features(
   vultures_tsbl,
   c(acc_x, acc_y, acc_z),
-  feature_set = c("catch22", "rabc_time2", "rabc_freq"),
-  winlen_dba_s = 1, # same as original winlen_dba = 21
+  feature_set = c(
+    "catch22",
+    "rabc_time2",
+    "rabc_freq",
+    "yu_full",
+    "yu_reduced",
+    "collins",
+    "harvey_carroll",
+    "arrieta",
+    "eikelboom"
+  ),
+  catch24 = TRUE,
+  sensors = vulture_sensors,
+  winlen_dba_s = 1,
   fs = 20,
-  catch24 = TRUE
+  seed = 123
 )
 toc()
+# 15 seconds for all feature sets
 BRRR::skrrrahh("soulja")
 
+vulture_features |> project_features(feature_set = "collins") |> plot()
 
-calc_features(
-  vultures_tsbl,
-  c(acc_x, acc_y, acc_z),
-  feature_set = c("catch22", "rabc_time2", "rabc_freq"),
-  winlen_dba_s = 1,
-  fs = 20
-)
-calc_features(
-  vultures_tsbl,
-  acc_x,
-  feature_set = "catch22",
-  features = list(mean = mean, sd = sd)
-)
-calc_features(
-  vultures_tsbl,
-  c(acc_x, acc_y, acc_z),
-  feature_set = NULL,
-  features = list(mean = mean, sd = sd)
-)
-calc_features(
-  vultures_tsbl,
-  c(acc_x, acc_y, acc_z),
-  feature_set = NULL,
-  features = list(mean = mean, range = \(v) max(v) - min(v))
-)
 
-calc_features(
-  vultures_tsbl,
-  c(acc_x, acc_y, acc_z),
-  feature_set = NULL,
-  winlen_dba_s = 1,
-  fs = 20,
-  features = list(
-    mean = mean,
-    odba = cross_feature(
-      c("acc_x", "acc_y", "acc_z"),
-      function(x, y, z, winlen) {
-        sba <- function(v) roll_static(v, winlen)
-        mean(
-          abs(x - sba(x)) + abs(y - sba(y)) + abs(z - sba(z)),
-          na.rm = TRUE
-        )
-      },
-      window = TRUE
-    )
-  )
-)
+# use feature_sets with a given feature set to check what features it includes
+feature_sets("eikelboom") # what a set contains
+feature_sets("catch22") # what a set contains
+feature_sets("yu_full") # what a set contains
+feature_sets("yu_reduced") # what a set contains
+feature_sets("rabc_time2") # what a set contains
+feature_sets("harvey_carroll") # what a set contains
 
+# tic()
+# vulture_features <- calc_features(
+#   vultures_tsbl,
+#   c(acc_x, acc_y, acc_z),
+#   feature_set = c("catch22", "rabc_time2", "rabc_freq"),
+#   winlen_dba_s = 1, # same as original winlen_dba = 21
+#   fs = 20,
+#   catch24 = TRUE
+# )
+# toc()
+# BRRR::skrrrahh("soulja")
+
+# calc_features(
+#   vultures_tsbl,
+#   c(acc_x, acc_y, acc_z),
+#   feature_set = c("catch22", "rabc_time2", "rabc_freq"),
+#   winlen_dba_s = 1,
+#   fs = 20
+# )
+# calc_features(
+#   vultures_tsbl,
+#   acc_x,
+#   feature_set = "catch22",
+#   features = list(mean = mean, sd = sd)
+# )
+# calc_features(
+#   vultures_tsbl,
+#   c(acc_x, acc_y, acc_z),
+#   feature_set = NULL,
+#   features = list(mean = mean, sd = sd)
+# )
+# calc_features(
+#   vultures_tsbl,
+#   c(acc_x, acc_y, acc_z),
+#   feature_set = NULL,
+#   features = list(mean = mean, range = \(v) max(v) - min(v))
+# )
+
+# calc_features(
+#   vultures_tsbl,
+#   c(acc_x, acc_y, acc_z),
+#   feature_set = NULL,
+#   winlen_dba_s = 1,
+#   fs = 20,
+#   features = list(
+#     mean = mean,
+#     odba = cross_feature(
+#       c("acc_x", "acc_y", "acc_z"),
+#       function(x, y, z, winlen) {
+#         sba <- function(v) roll_static(v, winlen)
+#         mean(
+#           abs(x - sba(x)) + abs(y - sba(y)) + abs(z - sba(z)),
+#           na.rm = TRUE
+#         )
+#       },
+#       window = TRUE
+#     )
+#   )
+# )
+
+tic()
 v2 <- calc_features(
   vultures_tsbl,
   c(acc_x, acc_y, acc_z),
-  feature_set = c("catch22", "rabc_time2", "rabc_freq"),
+  # feature_set = c("catch22", "rabc_time2", "rabc_freq"),
+  feature_set = c(
+    "catch22",
+    "rabc_time2",
+    "rabc_freq",
+    "yu_full",
+    "yu_reduced",
+    "collins",
+    "harvey_carroll",
+    "arrieta",
+    "eikelboom"
+  ),
   features = list(
     mean = mean,
     odba = cross_feature(
@@ -329,7 +394,19 @@ v2 <- calc_features(
   ),
   winlen_dba_s = 1, # same as original winlen_dba = 21
   fs = 20,
-  catch24 = TRUE
+  catch24 = TRUE,
+  sensors = vulture_sensors,
+  seed = 123
+)
+toc()
+BRRR::skrrrahh("liljon")
+
+v_freq <- calc_features(
+  vultures_tsbl,
+  c(acc_x, acc_y, acc_z),
+  feature_set = c("rabc_freq"),
+  winlen_dba_s = 1, # same as original winlen_dba = 21
+  fs = 20
 )
 
 glimpse(vulture_features)
@@ -406,7 +483,7 @@ v2_proj <- v2 %>%
 
 # plot dimension reduction for a specific behaviour only - e.g. flapping
 v2 %>%
-  #   mutate(label = if_else(label == "Flapping", "Flapping", "Other")) %>%
+  # mutate(label = if_else(label == "Flapping", "Flapping", "Other")) %>%
   project_features(
     norm_method = "zScore",
     feature_set = "rabc_time2",
@@ -416,13 +493,8 @@ v2 %>%
   ) %>%
   plot()
 
-# to do:
-# create function that directly calculates outputs of rabc df_time and df_freq
-# so I can plot a UMAP in the shiny app
-# and then eventually build my own replacement function
-# / the project function from theft, but adapted to my data/specified feature sets!
-# main mission now is to vizz how diff features affect UMAP output,
-# and start unsupervised feature selection!
+v2 %>%
+  explore_features()
 
 # import another dataset - cats ----
 cats_raw <- vroom::vroom(here(
@@ -526,13 +598,31 @@ plot_signal(
   fs = 40
 )
 
+cats_sensors <- tibble::tribble(
+  ~sensor , ~type           , ~column , ~role   , ~sign ,
+  "acc"   , "accelerometer" , "acc_x" , "sway"  ,     1 ,
+  "acc"   , "accelerometer" , "acc_y" , "surge" ,     1 ,
+  "acc"   , "accelerometer" , "acc_z" , "heave" ,     1
+)
+
 # run workflow on these to check feature calculation and UMAP works
 # feature calculation - cats labelled
 tic()
 cats_lab_features <- calc_features(
   cats_tsbl,
   c(acc_x, acc_y, acc_z),
-  feature_set = c("catch22", "rabc_time2", "rabc_freq"),
+  feature_set = c(
+    "catch22",
+    "rabc_time2",
+    "rabc_freq",
+    "yu_full",
+    "yu_reduced",
+    "collins",
+    "harvey_carroll",
+    "arrieta",
+    "eikelboom"
+  ),
+  sensors = cats_sensors,
   winlen_dba_s = 1, # 2s segment windows
   fs = 40,
   catch24 = TRUE
@@ -583,8 +673,7 @@ cats_unlab <- cats %>% select(-label)
 
 # segment + format data
 cats_unlab |>
-  add_segments(min_gap_s = 2) %>%
-  View()
+  add_segments(min_gap_s = 2) # %>% View()
 
 cats_unlab %>%
   make_bouts(min_gap_s = 2, duration_s = 2, fs = 40) # %>% View()
@@ -620,11 +709,34 @@ cat_unlab_bouts |>
 plot_signal(cats_unlab_tsbl, acc_x:acc_z, mode = "time", id = "F1", fs = 40)
 
 # feature calculation - cats unlabelled
+# tic()
+# cats_unlab_features <- calc_features(
+#   cats_unlab_tsbl,
+#   c(acc_x, acc_y, acc_z),
+#   feature_set = c("catch22", "rabc_time2", "rabc_freq"),
+#   winlen_dba_s = 1, # 2s segment windows
+#   fs = 40,
+#   catch24 = TRUE
+# )
+# toc()
+# BRRR::skrrrahh("liljon")
+
 tic()
 cats_unlab_features <- calc_features(
   cats_unlab_tsbl,
   c(acc_x, acc_y, acc_z),
-  feature_set = c("catch22", "rabc_time2", "rabc_freq"),
+  feature_set = c(
+    "catch22",
+    "rabc_time2",
+    "rabc_freq",
+    "yu_full",
+    "yu_reduced",
+    "collins",
+    "harvey_carroll",
+    "arrieta",
+    "eikelboom"
+  ),
+  sensors = cats_sensors,
   winlen_dba_s = 1, # 2s segment windows
   fs = 40,
   catch24 = TRUE
@@ -643,15 +755,15 @@ cats_unlab_features %>%
   ) %>%
   plot()
 
-cats_unlab_features %>%
-  project_features(
-    norm_method = "zScore",
-    feature_set = "rabc_time",
-    unit_int = TRUE,
-    low_dim_method = "UMAP",
-    seed = 12
-  ) %>%
-  plot()
+# cats_unlab_features %>%
+#   project_features(
+#     norm_method = "zScore",
+#     feature_set = "rabc_time",
+#     unit_int = TRUE,
+#     low_dim_method = "UMAP",
+#     seed = 12
+#   ) %>%
+#   plot()
 
 cats_unlab_features %>%
   project_features(
@@ -678,3 +790,61 @@ cats_unlab_features %>%
 # so shiny app feature check buttons will be dependent on what is available in the feature set
 vulture_features |>
   explore_features()
+
+v2 %>%
+  explore_features()
+
+v_freq %>%
+  explore_features()
+
+cats_lab_features %>%
+  explore_features()
+
+cats_unlab_features %>%
+  explore_features()
+
+# next step - screening features in R, before feature selection -----
+# screen_features
+# Per-feature screening of a calc_features() output, before feature selection.
+# Scores every feature on several complementary criteria, with or without
+# behaviour labels, and returns tidy tables you can sort, filter and plot.
+tic()
+scr_vf1 <- screen_features(vulture_features) # default K sweep 2–12
+toc()
+
+# 226.48 sec - 4 mins!
+scr_vf # summary, incl. the largest stable K
+scr_vf$summary # one row per feature, all criteria
+plot(scr_vf, "stability") # also "pairs", "redundancy"
+plot(scr_vf, "pairs")
+plot(scr_vf, "redundancy")
+
+scr_vf$scores
+
+scr_vf$pairs
+scr_vf$groups
+scr_vf$stability
+
+dir.create("03_plots/screen", recursive = TRUE, showWarnings = FALSE)
+readr::write_csv(scr_vf$summary, "03_plots/screen/vultures_summary.csv")
+readr::write_csv(scr_vf$groups, "03_plots/screen/vultures_groups.csv")
+readr::write_csv(scr_vf$stability, "03_plots/screen/vultures_stability.csv")
+readr::write_csv(scr_vf$pairs, "03_plots/screen/vultures_pairs.csv")
+ggplot2::ggsave(
+  "03_plots/screen/vultures_stability.png",
+  plot(scr_vf, "stability"),
+  width = 8,
+  height = 5
+)
+ggplot2::ggsave(
+  "03_plots/screen/vultures_pairs.png",
+  plot(scr_vf, "pairs"),
+  width = 10,
+  height = 7
+)
+ggplot2::ggsave(
+  "03_plots/screen/vultures_redundancy.png",
+  plot(scr_vf, "redundancy"),
+  width = 8,
+  height = 7
+)
