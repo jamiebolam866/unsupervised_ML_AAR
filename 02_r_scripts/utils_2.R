@@ -888,6 +888,11 @@ plot_signal <- function(
 #   arrieta        Arrieta 2025 Table 3.1: per-axis kurtosis, skew, static
 #                  acceleration (= mean), dynamic acceleration (= meandba);
 #                  ODBA; VeDBA. 14 on a tri-axial tag.
+#   vaadia         Vaadia et al. 2025 (griffon vultures; code: github.com/
+#                  Orrslab/ACC_behavior_classification): per-axis mean, max,
+#                  min, range, sd, skew, kurtosis, norm, q25, q50, q75,
+#                  mean_amplitude; per-pair cov, cor, meandiff, sddiff.
+#                  48 on a tri-axial tag.
 #
 # Accelerometer, body axes (roles surge/sway/heave REQUIRED; error if missing):
 #   yu_reduced     Yu et al. 2021 simplified set (backpacks, collars, legs):
@@ -915,7 +920,10 @@ plot_signal <- function(
 #          diff_acf1 = acf1 of diff(a) (tsfeatures diff1_acf1), diff_sd =
 #          sd(diff(a)), mean_crossings = number of times a crosses its own
 #          mean (sign changes of a - mean(a)), arv = average rectified value
-#          mean(|a|).
+#          mean(|a|), mean_amplitude = mean |difference| between consecutive
+#          local extrema (peak-to-trough height), exactly as Vaadia et al.'s
+#          mean_amplitude(): turning points are where sign(diff(a)) flips
+#          from +1 to -1 or back.
 #   pair   cov, cor (Pearson), meandiff = mean(a - b), sddiff = sd(a - b),
 #          in the order xy, yz, xz.
 #   dba    static acceleration s = centred rolling mean over `winlen_dba`;
@@ -996,6 +1004,27 @@ plot_signal <- function(
 #     dynamic version: features = list(arv_dyn = \(v) mean(abs(v - mean(v)))).
 #   * Entropy normalised to 0-1 (divided by log of the number of bins) so it
 #     is comparable across bout lengths; un-normalised = fft_entropy * log(K).
+#
+# Vaadia et al. 2025 (vaadia)
+#   * Source of truth is their code (1 - building_rf_model.Rmd, section 6),
+#     which computes 48 features. The paper's text says 47, and its feature
+#     table lists 15 feature types (45 features) without the per-pair
+#     correlations; the code computes cor and the random forest uses it, so
+#     cor is included.
+#   * Bouts: 5 s at 20 Hz (100 samples); incomplete bouts dropped. Their ACC is
+#     calibrated per tag (slope and intercept from a six-orientation
+#     calibration) before features are computed; the published training data
+#     are already calibrated.
+#   * Kurtosis: moments::kurtosis() is Pearson's (non-excess) m4 / m2^2; ours
+#     is excess, so Vaadia's value = ours + 3. Rankings, tree splits and every
+#     screen_features() criterion are unaffected. To match the values exactly:
+#     features = list(kurt_pearson = \(v) { d <- v - mean(v); mean(d^4) / mean(d^2)^2 }).
+#     moments::skewness() = m3 / m2^1.5, identical to ours.
+#   * mean_amplitude is reproduced exactly, including two quirks of the
+#     original: a peak or trough with a flat top (the same value repeated at
+#     the turning point) is not detected, and a bout with fewer than two
+#     turning points (a perfectly smooth or flat signal) gives NA (NaN in
+#     their code).
 #
 # rabc (rabc_time1, rabc_time2, rabc_freq): exact parity with the original
 #   functions, checked numerically (rolling mean, ODBA, freq conventions).
@@ -1191,24 +1220,46 @@ plot_signal <- function(
             "stream"
         ),
         .reg("eikelboom", "seq", .seq_features, "stream"),
-        .reg("eikelboom", "freq", .fft_features, "stream")
+        .reg("eikelboom", "freq", .fft_features, "stream"),
+        # Vaadia et al. 2025, order of their code (section 6)
+        .reg(
+            "vaadia",
+            "stat",
+            c(
+                "mean",
+                "range",
+                "sd",
+                "skew",
+                "kurtosis",
+                "max",
+                "min",
+                "norm",
+                "q25",
+                "q50",
+                "q75"
+            ),
+            "axis"
+        ),
+        .reg("vaadia", "pair", .pair_features, "pair"),
+        .reg("vaadia", "seq", "mean_amplitude", "axis")
     )
 }
 
 .set_info <- tibble::tribble(
-    ~feature_set     , ~needs                                   , ~source                                            ,
-    "catch22"        , "any sensor"                             , "Lubba et al. 2019 (Rcatch22)"                     ,
-    "stats"          , "any sensor"                             , "generic per-stream summaries"                     ,
-    "rabc_time1"     , "accelerometer"                          , "rabc (Yu & Klaassen); exact parity"               ,
-    "rabc_time2"     , "accelerometer"                          , "rabc expanded; exact parity"                      ,
-    "rabc_freq"      , "accelerometer"                          , "rabc; exact parity"                               ,
-    "yu_full"        , "accelerometer (+ roles for pitch/roll)" , "Yu et al. 2021, Table 1"                          ,
-    "yu_reduced"     , "accelerometer + roles"                  , "Yu et al. 2021, simplified (backpack/collar/leg)" ,
-    "yu_reduced_ear" , "accelerometer + roles"                  , "Yu et al. 2021, simplified (ear tag)"             ,
-    "collins"        , "accelerometer + roles"                  , "Collins et al. 2015"                              ,
-    "harvey_carroll" , "accelerometer + roles"                  , "Harvey-Carroll et al. 2024"                       ,
-    "arrieta"        , "accelerometer"                          , "Arrieta 2025, Table 3.1"                          ,
-    "eikelboom"      , "any sensor (needs fs)"                  , "Eikelboom et al. 2026, IMU features"
+    ~feature_set     , ~needs                                   , ~source                                                 ,
+    "catch22"        , "any sensor"                             , "Lubba et al. 2019 (Rcatch22)"                          ,
+    "stats"          , "any sensor"                             , "generic per-stream summaries"                          ,
+    "rabc_time1"     , "accelerometer"                          , "rabc (Yu & Klaassen); exact parity"                    ,
+    "rabc_time2"     , "accelerometer"                          , "rabc expanded; exact parity"                           ,
+    "rabc_freq"      , "accelerometer"                          , "rabc; exact parity"                                    ,
+    "yu_full"        , "accelerometer (+ roles for pitch/roll)" , "Yu et al. 2021, Table 1"                               ,
+    "yu_reduced"     , "accelerometer + roles"                  , "Yu et al. 2021, simplified (backpack/collar/leg)"      ,
+    "yu_reduced_ear" , "accelerometer + roles"                  , "Yu et al. 2021, simplified (ear tag)"                  ,
+    "collins"        , "accelerometer + roles"                  , "Collins et al. 2015"                                   ,
+    "harvey_carroll" , "accelerometer + roles"                  , "Harvey-Carroll et al. 2024"                            ,
+    "arrieta"        , "accelerometer"                          , "Arrieta 2025, Table 3.1"                               ,
+    "eikelboom"      , "any sensor (needs fs)"                  , "Eikelboom et al. 2026, IMU features"                   ,
+    "vaadia"         , "accelerometer"                          , "Vaadia et al. 2025 (griffon vultures), code section 6"
 )
 .feature_set_names <- .set_info$feature_set
 .role_sets <- c("yu_reduced", "yu_reduced_ear", "collins", "harvey_carroll")
@@ -2144,8 +2195,16 @@ feature_long <- function(x) {
         diff_acf1 = .acf1(dv),
         diff_sd = stats::sd(dv),
         mean_crossings = sum(diff(sgn) != 0),
-        arv = mean(abs(v))
+        arv = mean(abs(v)),
+        mean_amplitude = .mean_amplitude(v)
     )
+}
+
+# Vaadia et al. 2025 mean_amplitude(), verbatim: mean |height| between
+# consecutive turning points. NaN (-> NA) with fewer than two turning points.
+.mean_amplitude <- function(x) {
+    ext <- which(abs(diff(sign(diff(x)))) == 2) + 1
+    mean(abs(x[ext[-1]] - x[ext[-length(ext)]]))
 }
 
 # Eikelboom frequency features: FFT of the de-meaned bout, one-sided, no DC.
@@ -3821,19 +3880,39 @@ winlen_sensitivity <- function(
 #                linkage; each column ranked once, so with missing values the
 #                ranks use each feature's own non-missing bouts) and cut so every pair inside a group has |rho| >=
 #                `cor_threshold` (default 0.9, rabc's cutoff). One
-#                representative per group: the member with the highest mean
-#                |rho| to the rest. Downstream multivariate criteria
+#                representative per group, chosen for interpretability: the
+#                member from the first family in `rep_prefer` (default stat,
+#                pair, orient, dba, seq, freq, custom, catch22), then the most
+#                central (highest mean |rho| to the rest, to 3 dp), then the
+#                shortest name (so sd beats variance, whose ranks are
+#                identical). rep_prefer = NULL: most central only. Within a
+#                group the choice barely matters. Downstream multivariate criteria
 #                (sparse k-means, set-level stability, the Laplacian graph)
 #                use representatives only, so redundant copies of the same
 #                signal do not get extra votes.
+#   n_distinct   Number of distinct values. Step-valued features (integer lags
+#                and counts, histogram bins, FFT bin frequencies, catch22
+#                proportions) have few.
 #   dip_stat, dip_p
-#                Hartigan's dip test of unimodality on the raw values
-#                (diptest). Small p = evidence of more than one mode.
+#                Hartigan's dip test of unimodality (diptest). Small p =
+#                evidence of more than one mode. Tied values are dithered first
+#                (`jitter_ties`, default TRUE: uniform noise of +/- half the
+#                median gap between distinct values): without this, the spikes
+#                of a step-valued feature are read as modes and integer
+#                features come out "multimodal" in every individual. Features
+#                with fewer than `min_distinct` (10) distinct values get NA for
+#                all multimodality criteria. `log_skewed = TRUE` tests strictly
+#                positive features with skewness > 1 on the log scale
+#                (`modality_log_scale` = 1 marks them): intensity features
+#                (sd, VeDBA) often show "still vs active" as a long right tail
+#                rather than a second peak on the raw scale. Modality depends
+#                on the scale; neither scale is the "true" one.
 #   gmm_components
-#                Number of Gaussian mixture components chosen by BIC (mclust,
-#                1-5, unequal variances). More sensitive than the dip test to
-#                small modes from rare behaviours, but a skewed unimodal
-#                feature can also need 2 components, so this is a count of
+#                Number of Gaussian mixture components chosen by ICL (mclust,
+#                1-5, unequal variances), on the same values as the dip test.
+#                ICL = BIC with a penalty for overlapping components; BIC
+#                alone kept adding components to fit skew and tails at n in
+#                the thousands, so most features hit the cap. Still a count of
 #                components, not of modes.
 #   within_id_multimodal
 #                Share of individuals (with >= `min_bouts_id` bouts) whose own
@@ -3857,7 +3936,14 @@ winlen_sensitivity <- function(
 #                Feature weight from sparse k-means (Witten & Tibshirani 2010)
 #                on the normalised representatives. 0 = not used. The L1 bound
 #                is tuned once by permutation (gap statistic) at the middle K,
-#                or set via `sparse_wbound`. Non-representative features get NA
+#                or set via `sparse_wbound`. `sparse_rule = "one_se"` (default)
+#                takes the smallest bound whose gap is within one sd of the
+#                largest (Witten & Tibshirani 2010's alternative rule; sparser);
+#                "max" takes the largest gap (sparcl's bestw). With "max" on the
+#                vultures every feature kept a nonzero weight at every K, so
+#                the weights ranked but did not select. The tuning table is in
+#                $settings$sparse_tuning, features kept per K in $sparse.
+#                Non-representative features get NA
 #                (see their group). Same algorithm as
 #                sparcl::KMeansSparseCluster / .permute, step for step and with
 #                the same random-number use (results match sparcl exactly for
@@ -3898,6 +3984,13 @@ winlen_sensitivity <- function(
 #                Median / worst separability over behaviour pairs, where
 #                separability = max(AUC, 1 - AUC) (0.5 none, 1 perfect).
 #                The full feature x pair table is returned in $pairs.
+#   clusters vs labels
+#                k-means (all representatives, all bouts) at each K, cross-
+#                tabulated against the labels ($clusters: k, label, cluster,
+#                n) and summarised as the ARI with the labels
+#                ($cluster_agreement, and column ari_labels in $stability).
+#                Shows WHICH behaviours merge when the stable K is below the
+#                number of labels. plot(x, "clusters", k = 5).
 #
 # =============================================================================
 # K (number of clusters) for the K-dependent criteria
@@ -3920,9 +4013,16 @@ winlen_sensitivity <- function(
 #   $scores     long: feature, criterion, k (NA if K-free), value.
 #   $pairs      feature x behaviour pair separability (labelled data only).
 #   $groups     redundancy groups: group, feature, is_representative, rho.
-#   $stability  set-level stability per K (mean and sd over folds).
-#   $settings   the arguments used.
-#   plot(x, type = "stability" | "pairs" | "redundancy")
+#   $stability  set-level stability per K (mean and sd over folds; plus
+#               ari_labels with labels).
+#   $sparse     sparse k-means: L1 bound and number of features kept per K.
+#   $clusters   label x cluster counts per K (labelled data only).
+#   $cluster_agreement  ARI between clusters and labels per K.
+#   $assignments  one row per bout (.row = row of `data`, id, label): the
+#               k-means cluster at every K (columns k2, k3, ...), e.g. to check
+#               whether clusters follow individuals rather than behaviours.
+#   $settings   the arguments used (sparse_tuning: the permutation table).
+#   plot(x, type = "stability" | "pairs" | "redundancy" | "clusters")
 #
 # Normalisation for the clustering/graph criteria: `norm_method` (default
 # "RobustSigmoid", via normaliseR) so heavy-tailed features (cv, kurtosis)
@@ -3942,15 +4042,22 @@ winlen_sensitivity <- function(
 #'                      multimodality.
 #' @param k             NULL (default sweep), a single K, or a vector of K.
 #' @param cor_threshold |Spearman rho| above which features count as redundant.
+#' @param rep_prefer    Family order for choosing each group's representative
+#'                      (most interpretable first); NULL = most central member.
 #' @param norm_method   Normalisation for the clustering/graph criteria; one of
 #'                      "RobustSigmoid", "zScore", "Sigmoid", "MinMax", "MaxAbs".
 #' @param n_folds       Folds (by individual) for the stability criteria.
 #' @param min_bouts_id  Minimum bouts for an individual to enter
 #'                      within_id_multimodal.
 #' @param min_n         Minimum bouts for a label to enter the labelled scores.
+#' @param jitter_ties   Dither tied values before the dip test / mixture model.
+#' @param min_distinct  Fewer distinct values than this: multimodality NA.
+#' @param log_skewed    Test positive, right-skewed features on the log scale.
 #' @param laplacian_k   Neighbours in the Laplacian-score graph.
 #' @param sparse_wbound L1 bound for sparse k-means; NULL tunes it by
 #'                      permutation at the middle K.
+#' @param sparse_rule   "one_se" (smallest bound within one sd of the best gap)
+#'                      or "max" (largest gap, as sparcl).
 #' @param sparse_nperms Permutations for that tuning.
 #' @param feature_stability Compute per-feature stability (the slowest part).
 #' @param stable_tol    Tolerance below the maximum set-level stability within
@@ -3972,12 +4079,26 @@ screen_features <- function(
     id_col = "id",
     k = NULL,
     cor_threshold = 0.9,
+    rep_prefer = c(
+        "stat",
+        "pair",
+        "orient",
+        "dba",
+        "seq",
+        "freq",
+        "custom",
+        "catch22"
+    ),
     norm_method = c("RobustSigmoid", "zScore", "Sigmoid", "MinMax", "MaxAbs"),
     n_folds = 5,
     min_bouts_id = 30,
     min_n = 10,
+    jitter_ties = TRUE,
+    min_distinct = 10,
+    log_skewed = FALSE,
     laplacian_k = 10,
     sparse_wbound = NULL,
+    sparse_rule = c("one_se", "max"),
     sparse_nperms = 10,
     feature_stability = TRUE,
     stable_tol = 0.05,
@@ -3988,6 +4109,7 @@ screen_features <- function(
     say <- function(...) if (verbose) rlang::inform(paste0(...))
     t0 <- Sys.time()
     norm_method <- match.arg(norm_method)
+    sparse_rule <- match.arg(sparse_rule)
 
     # ---- checks and feature columns ----------------------------------------------
     if (!is.data.frame(data)) {
@@ -4095,17 +4217,62 @@ screen_features <- function(
 
     # ---- 1. redundancy ----------------------------------------------------------------
     say("Redundancy groups (|Spearman rho| >= ", cor_threshold, ") ...")
-    red <- .redundancy_groups(X, cor_threshold)
+    red <- .redundancy_groups(X, cor_threshold, prefer = rep_prefer)
     reps <- red$feature[red$is_representative]
     say("  ", length(use), " features -> ", length(reps), " groups.")
 
     # ---- 2. multimodality -------------------------------------------------------------
     say("Multimodality (dip test, mixture models, within individuals) ...")
+    n_dist <- vapply(
+        use,
+        function(f) length(unique(stats::na.omit(X[, f]))),
+        numeric(1)
+    )
+    add("n_distinct", n_dist)
+    # values as the modality tests see them (log / dithered), bout order kept
+    M <- X
+    logged <- stats::setNames(rep(NA, length(use)), use)
+    for (f in use) {
+        ok <- !is.na(X[, f])
+        v <- .modality_values(X[ok, f], log_skewed, jitter_ties, min_distinct)
+        if (is.null(v)) {
+            M[, f] <- NA
+            next
+        }
+        M[ok, f] <- v
+        logged[f] <- attr(v, "logged")
+    }
+    few <- sum(n_dist < min_distinct)
+    if (few) {
+        say(
+            "  ",
+            few,
+            " feature(s) with < ",
+            min_distinct,
+            " distinct values: multimodality not assessed (NA)."
+        )
+    }
+    if (jitter_ties) {
+        say(
+            "  Tied values dithered before the dip test and mixture models (jitter_ties = TRUE)."
+        )
+    }
+    if (log_skewed) {
+        add("modality_log_scale", stats::setNames(as.numeric(logged), use))
+        say(
+            "  ",
+            sum(logged, na.rm = TRUE),
+            " positive right-skewed feature(s) tested on the log scale."
+        )
+    }
     dip <- t(vapply(
         use,
         function(f) {
-            x <- X[, f]
+            x <- M[, f]
             x <- x[!is.na(x)]
+            if (!length(x)) {
+                return(c(stat = NA_real_, p = NA_real_))
+            }
             d <- suppressWarnings(diptest::dip.test(x))
             c(stat = unname(d$statistic), p = d$p.value)
         },
@@ -4115,7 +4282,7 @@ screen_features <- function(
     add("dip_p", dip[, "p"])
     add(
         "gmm_components",
-        vapply(use, function(f) .gmm_components(X[, f]), numeric(1))
+        vapply(use, function(f) .gmm_components(M[, f]), numeric(1))
     )
     id_tab <- table(ids)
     big_ids <- names(id_tab)[id_tab >= min_bouts_id]
@@ -4128,7 +4295,7 @@ screen_features <- function(
                     p <- vapply(
                         big_ids,
                         function(i) {
-                            x <- X[ids == i, f]
+                            x <- M[ids == i, f]
                             x <- x[!is.na(x)]
                             if (length(x) < min_bouts_id || stats::sd(x) == 0) {
                                 return(NA_real_)
@@ -4163,6 +4330,7 @@ screen_features <- function(
     Xr <- scale(Xn[, reps, drop = FALSE])
     Xr[!is.finite(Xr)] <- 0
     wb <- sparse_wbound
+    tuning <- NULL
     if (is.null(wb)) {
         k_mid <- k[ceiling(length(k) / 2)]
         perm <- suppressWarnings(.sparse_kmeans_permute(
@@ -4170,21 +4338,42 @@ screen_features <- function(
             K = k_mid,
             nperms = sparse_nperms
         ))
-        wb <- perm$bestw
+        wb <- if (sparse_rule == "one_se") perm$onese_w else perm$bestw
+        tuning <- tibble::tibble(
+            wbound = perm$wbounds,
+            gap = perm$gaps,
+            gap_sd = perm$sdgaps,
+            n_nonzero = perm$nnonzerows,
+            chosen = perm$wbounds == wb
+        )
         say(
             "  L1 bound tuned by permutation at K = ",
             k_mid,
-            ": ",
+            " (rule \"",
+            sparse_rule,
+            "\"): ",
             round(wb, 2),
             " (range 1 to ",
             round(sqrt(ncol(Xr)), 2),
-            ")."
+            "; ",
+            perm$nnonzerows[perm$wbounds == wb],
+            " of ",
+            ncol(Xr),
+            " features kept at that K)."
         )
     }
+    sparse_k <- list()
     for (kk in k) {
         fit <- suppressWarnings(.sparse_kmeans(Xr, K = kk, wbounds = wb))
         add("sparse_weight", stats::setNames(fit[[1]]$ws, reps), kk)
+        sparse_k[[length(sparse_k) + 1]] <- tibble::tibble(
+            k = kk,
+            wbound = wb,
+            n_selected = sum(fit[[1]]$ws > 0),
+            n_features = length(reps)
+        )
     }
+    sparse_k <- dplyr::bind_rows(sparse_k)
 
     # ---- 5. stability across individuals ------------------------------------------------
     folds <- .id_folds(ids, n_folds)
@@ -4254,8 +4443,26 @@ screen_features <- function(
         }
     }
 
+    # ---- k-means on all representatives, all bouts, per K (kept per bout) ---------------
+    km_all <- lapply(k, function(kk) {
+        suppressWarnings(stats::kmeans(
+            Xr,
+            kk,
+            nstart = 10,
+            iter.max = 50
+        ))$cluster
+    })
+    names(km_all) <- paste0("k", k)
+    assignments <- tibble::tibble(.row = seq_len(n), !!id_col := df[[id_col]])
+    if (!is.null(label_col) && label_col %in% names(df)) {
+        assignments[[label_col]] <- df[[label_col]]
+    }
+    assignments <- dplyr::bind_cols(assignments, tibble::as_tibble(km_all))
+
     # ---- 6. labelled scores --------------------------------------------------------------
     pairs <- NULL
+    clusters <- NULL
+    ari_lab <- NULL
     has_label <- !is.null(label_col) && label_col %in% names(df)
     n_labels <- NA_integer_
     if (has_label) {
@@ -4296,6 +4503,34 @@ screen_features <- function(
                 )
             add("pair_sep_median", stats::setNames(ps$med, ps$feature))
             add("pair_sep_min", stats::setNames(ps$min, ps$feature))
+
+            # which behaviours end up together? k-means on all representatives at
+            # each K (all bouts), cross-tabulated against the labels afterwards
+            say("Clusters vs labels over K ...")
+            clus <- lapply(k, function(kk) {
+                cl <- km_all[[paste0("k", kk)]][in_lab]
+                list(
+                    ari = .ari(cl, L),
+                    tab = tibble::as_tibble(as.data.frame(
+                        table(label = L, cluster = cl),
+                        stringsAsFactors = FALSE
+                    )) |>
+                        dplyr::mutate(
+                            k = kk,
+                            cluster = as.integer(.data$cluster),
+                            n = as.integer(.data$Freq)
+                        ) |>
+                        dplyr::select("k", "label", "cluster", "n")
+                )
+            })
+            clusters <- dplyr::bind_rows(lapply(clus, `[[`, "tab"))
+            ari_lab <- tibble::tibble(
+                k = k,
+                ari_labels = vapply(clus, `[[`, numeric(1), "ari")
+            )
+            if (!is.null(stab_k)) {
+                stab_k <- dplyr::left_join(stab_k, ari_lab, by = "k")
+            }
         } else {
             say(
                 "Fewer than 2 behaviours with >= ",
@@ -4314,14 +4549,28 @@ screen_features <- function(
             pairs = pairs,
             groups = red,
             stability = stab_k,
+            sparse = sparse_k,
+            clusters = clusters,
+            cluster_agreement = ari_lab,
+            assignments = assignments,
             settings = list(
                 k = k,
                 cor_threshold = cor_threshold,
+                rep_prefer = rep_prefer,
                 norm_method = norm_method,
                 stable_tol = stable_tol,
                 n_folds = n_folds,
                 laplacian_k = laplacian_k,
+                jitter_ties = jitter_ties,
+                min_distinct = min_distinct,
+                log_skewed = log_skewed,
                 sparse_wbound = wb,
+                sparse_rule = if (is.null(sparse_wbound)) {
+                    sparse_rule
+                } else {
+                    "user"
+                },
+                sparse_tuning = tuning,
                 n_bouts = n,
                 n_individuals = length(unique(ids)),
                 n_labels = n_labels,
@@ -4345,7 +4594,7 @@ screen_features <- function(
 
 # Complete-linkage clustering on 1 - |Spearman rho|; every pair within a group
 # has |rho| >= threshold. Representative = highest mean |rho| to the others.
-.redundancy_groups <- function(X, threshold) {
+.redundancy_groups <- function(X, threshold, prefer = NULL) {
     R <- apply(X, 2, rank, na.last = "keep", ties.method = "average") # rank once, then Pearson
     r <- suppressWarnings(stats::cor(R, use = "pairwise.complete.obs"))
     r[is.na(r)] <- 0
@@ -4371,8 +4620,19 @@ screen_features <- function(
         numeric(1)
     )
     res$is_representative <- FALSE
+    fam <- sub("__.*", "", res$feature)
     for (g in unique(grp)) {
         m <- which(grp == g)
+        if (length(m) > 1 && length(prefer)) {
+            # most interpretable family present, then most central (3 dp, so exact
+            # rank twins such as sd / variance tie), then the shortest name
+            fr <- match(fam[m], prefer)
+            fr[is.na(fr)] <- length(prefer) + 1
+            m <- m[fr == min(fr)]
+            cen <- round(res$mean_abs_rho[m], 3)
+            m <- m[cen == max(cen)]
+            m <- m[order(nchar(res$feature[m]))][1]
+        }
         best <- if (length(m) == 1) m else m[which.max(res$mean_abs_rho[m])]
         res$is_representative[best] <- TRUE
     }
@@ -4383,7 +4643,11 @@ screen_features <- function(
     res
 }
 
-.gmm_components <- function(x, max_n = 3000) {
+# Number of components by ICL (BIC minus an entropy penalty for overlapping
+# components). BIC alone kept adding components to model skewness and tails
+# at n in the thousands (most features hit the cap); ICL favours components
+# that are actually separated.
+.gmm_components <- function(x, max_n = 3000, G = 1:5) {
     x <- x[!is.na(x)]
     if (length(x) > max_n) {
         x <- sample(x, max_n)
@@ -4391,20 +4655,71 @@ screen_features <- function(
     if (length(unique(x)) < 5) {
         return(NA_real_)
     }
-    # mclustBIC directly: Mclust() only works with mclust attached
-    bic <- tryCatch(
-        .quiet(mclust::mclustBIC(
-            x,
-            G = 1:5,
-            modelNames = "V",
-            verbose = FALSE
-        )),
+    # ICL computed here as in mclust::mclustICL / icl.Mclust (identical values):
+    # mclustICL itself calls mclustBIC unqualified, so it fails unless mclust is attached
+    icl <- tryCatch(
+        .quiet({
+            bic <- mclust::mclustBIC(
+                x,
+                G = G,
+                modelNames = "V",
+                verbose = FALSE
+            )
+            vapply(
+                seq_along(G),
+                function(i) {
+                    if (is.na(bic[i, 1])) {
+                        return(NA_real_)
+                    }
+                    s <- mclust::summaryMclustBIC(
+                        bic,
+                        x,
+                        G = G[i],
+                        modelNames = "V"
+                    )
+                    if (is.null(s$z)) {
+                        s$bic
+                    } else {
+                        s$bic + 2 * sum(log(apply(s$z, 1, max)))
+                    }
+                },
+                numeric(1)
+            )
+        }),
         error = function(e) NULL
     )
-    if (is.null(bic) || all(is.na(bic))) {
+    if (is.null(icl) || all(is.na(icl))) {
         return(NA_real_)
     }
-    as.numeric(which.max(bic[, 1])) # mclust's BIC: larger is better
+    as.numeric(G[which.max(icl)]) # larger is better, as mclust's BIC
+}
+
+# Prepare one feature for the modality tests: optional log for strictly
+# positive right-skewed features, then dithering of tied values. Ties (integer
+# counts, lags, histogram bins, quantised raw data) form spikes that the dip
+# test reads as modes; adding uniform noise of +/- half the typical gap between
+# distinct values turns a step-valued feature back into the continuous
+# distribution it approximates. NULL if too few distinct values to judge.
+.modality_values <- function(x, log_skewed, jitter_ties, min_distinct) {
+    x <- x[!is.na(x)]
+    u <- sort(unique(x))
+    if (length(u) < min_distinct) {
+        return(NULL)
+    }
+    logged <- FALSE
+    if (log_skewed && u[1] > 0) {
+        d <- x - mean(x)
+        if (mean(d^3) / mean(d^2)^1.5 > 1) {
+            x <- log(x)
+            u <- sort(unique(x))
+            logged <- TRUE
+        }
+    }
+    if (jitter_ties && length(u) < length(x)) {
+        h <- stats::median(diff(u)) / 2
+        x <- x + stats::runif(length(x), -h, h)
+    }
+    structure(x, logged = logged)
 }
 
 # Laplacian score (He et al. 2005), as Rdimtools::do.lscore but with a sparse
@@ -4580,13 +4895,19 @@ screen_features <- function(
     )
     permtots <- matrix(permtots, nrow = length(wbounds))
     gaps <- log(tots) - rowMeans(log(permtots))
+    sdgaps <- apply(log(permtots), 1, stats::sd)
+    imax <- which.max(gaps)
     list(
         tots = tots,
         permtots = permtots,
         gaps = gaps,
+        sdgaps = sdgaps,
         wbounds = wbounds,
         nnonzerows = vapply(out, function(o) sum(o$ws != 0), numeric(1)),
-        bestw = wbounds[which.max(gaps)]
+        bestw = wbounds[imax], # sparcl: largest gap
+        # Witten & Tibshirani 2010 alternative: smallest bound whose gap is within
+        # one sd of log(O*(s)) of the largest gap -> sparser, nearly as good
+        onese_w = wbounds[min(which(gaps >= gaps[imax] - sdgaps))]
     )
 }
 
@@ -4896,25 +5217,55 @@ print.feature_screen <- function(x, ...) {
             "\n"
         )
     }
+    if (!is.null(x$cluster_agreement)) {
+        ca <- x$cluster_agreement
+        cat(
+            "  Agreement of k-means clusters with labels (ARI): best at K =",
+            ca$k[which.max(ca$ari_labels)],
+            paste0("(", round(max(ca$ari_labels, na.rm = TRUE), 2), ")"),
+            "\n"
+        )
+    }
+    if (!is.null(x$sparse) && nrow(x$sparse)) {
+        cat(
+            "  Sparse k-means: L1 bound",
+            round(s$sparse_wbound, 2),
+            paste0("(", s$sparse_rule, ");"),
+            "features kept per K:",
+            paste(range(x$sparse$n_selected), collapse = "-"),
+            "of",
+            x$sparse$n_features[1],
+            "\n"
+        )
+    }
     cat(
-        "  Tables: $summary, $scores, $pairs, $groups, $stability. plot(x, 'stability' | 'pairs' | 'redundancy')\n"
+        "  Tables: $summary, $scores, $pairs, $groups, $stability, $sparse, $clusters\n"
     )
+    cat("  plot(x, 'stability' | 'pairs' | 'redundancy' | 'clusters')\n")
     invisible(x)
 }
 
 #' Plot a feature_screen
 #'
 #' @param x    A feature_screen.
-#' @param type "stability" (set-level stability against K), "pairs" (feature x
-#'             behaviour-pair separability heatmap, labelled data) or
-#'             "redundancy" (group sizes).
+#' @param type "stability" (set-level stability against K, plus agreement with
+#'             labels if available), "pairs" (feature x behaviour-pair
+#'             separability heatmap, labelled data), "redundancy" (group sizes)
+#'             or "clusters" (labels x k-means clusters at one K).
 #' @param top  For "pairs": number of features shown (highest median
 #'             separability).
+#' @param reps_only For "pairs": show redundancy representatives only (default),
+#'             labelled with the number of features they stand for, so the rows
+#'             are distinct signals rather than copies of the same one.
+#' @param k    For "clusters": the K to show. Default: the largest stable K
+#'             (or the number of labels if stability was not computed).
 #' @param ...  Unused.
 plot.feature_screen <- function(
     x,
-    type = c("stability", "pairs", "redundancy"),
+    type = c("stability", "pairs", "redundancy", "clusters"),
     top = 25,
+    reps_only = TRUE,
+    k = NULL,
     ...
 ) {
     type <- match.arg(type)
@@ -4924,10 +5275,35 @@ plot.feature_screen <- function(
         if (is.null(x$stability)) {
             rlang::abort("No stability results (fewer than 2 individuals).")
         }
-        top <- max(x$stability$stability, na.rm = TRUE)
+        st <- x$stability
+        top <- max(st$stability, na.rm = TRUE)
+        has_lab <- "ari_labels" %in% names(st)
+        long <- tibble::tibble(
+            k = st$k,
+            value = st$stability,
+            sd = st$sd,
+            what = "Stability across individuals (label-free)"
+        )
+        if (has_lab) {
+            long <- dplyr::bind_rows(
+                long,
+                tibble::tibble(
+                    k = st$k,
+                    value = st$ari_labels,
+                    sd = NA_real_,
+                    what = "Agreement with labels (uses labels)"
+                )
+            )
+        }
+        long$what <- factor(long$what, levels = unique(long$what))
         p <- ggplot2::ggplot(
-            x$stability,
-            ggplot2::aes(.data$k, .data$stability)
+            long,
+            ggplot2::aes(
+                .data$k,
+                .data$value,
+                colour = .data$what,
+                linetype = .data$what
+            )
         ) +
             ggplot2::annotate(
                 "rect",
@@ -4939,37 +5315,48 @@ plot.feature_screen <- function(
                 alpha = 0.08
             ) +
             ggplot2::geom_errorbar(
+                data = long[!is.na(long$sd), ],
                 ggplot2::aes(
-                    ymin = .data$stability - .data$sd,
-                    ymax = .data$stability + .data$sd
+                    ymin = .data$value - .data$sd,
+                    ymax = .data$value + .data$sd
                 ),
                 width = 0.15,
-                colour = "grey60"
+                colour = "grey60",
+                linetype = "solid"
             ) +
-            ggplot2::geom_line(colour = "#0072B2") +
-            ggplot2::geom_point(colour = "#0072B2", size = 2) +
+            ggplot2::geom_line() +
+            ggplot2::geom_point(size = 2) +
+            ggplot2::scale_colour_manual(
+                values = c("#0072B2", "#D55E00"),
+                name = NULL
+            ) +
+            ggplot2::scale_linetype_manual(
+                values = c("solid", "dashed"),
+                name = NULL
+            ) +
             ggplot2::scale_x_continuous(breaks = x$settings$k) +
             ggplot2::labs(
                 x = "Number of clusters (K)",
-                y = "Stability across individuals (ARI)",
+                y = "Adjusted Rand index",
                 title = "Which numbers of clusters reproduce across individuals?",
                 subtitle = paste0(
                     "Mean +/- sd over individual folds. Shaded band: within ",
                     x$settings$stable_tol,
-                    " of the maximum.\nRead the largest K inside the band, not the peak."
+                    " of the maximum stability.\nRead the largest K inside the band, not the peak."
                 )
             ) +
-            th
+            th +
+            ggplot2::theme(legend.position = "bottom")
         if (!is.na(x$settings$n_labels)) {
             p <- p +
                 ggplot2::geom_vline(
                     xintercept = x$settings$n_labels,
-                    linetype = "dashed"
+                    linetype = "dotted"
                 ) +
                 ggplot2::annotate(
                     "text",
                     x = x$settings$n_labels,
-                    y = max(x$stability$stability, na.rm = TRUE),
+                    y = max(long$value, na.rm = TRUE),
                     label = " labelled behaviours",
                     hjust = 0,
                     vjust = 1,
@@ -4984,16 +5371,42 @@ plot.feature_screen <- function(
                 "No labelled results: `label_col` absent or too few labelled bouts."
             )
         }
-        keep <- x$summary |>
-            dplyr::filter(!is.na(.data$pair_sep_median)) |>
+        cand <- x$summary |> dplyr::filter(!is.na(.data$pair_sep_median))
+        if (reps_only) {
+            cand <- dplyr::filter(cand, .data$is_representative %in% TRUE)
+        }
+        keep <- cand |>
             dplyr::arrange(dplyr::desc(.data$pair_sep_median)) |>
             utils::head(top)
+        lab <- if (reps_only) {
+            ifelse(
+                keep$group_size > 1,
+                paste0(keep$feature, " (+", keep$group_size - 1, ")"),
+                keep$feature
+            )
+        } else {
+            keep$feature
+        }
         d <- x$pairs |>
             dplyr::filter(.data$feature %in% keep$feature) |>
             dplyr::mutate(
                 pair = paste(.data$label_a, "vs", .data$label_b),
-                feature = factor(.data$feature, levels = rev(keep$feature))
+                feature = factor(
+                    lab[match(.data$feature, keep$feature)],
+                    levels = rev(lab)
+                )
             )
+        sub <- paste0(
+            "Top ",
+            nrow(keep),
+            if (reps_only) " redundancy representatives" else " features",
+            " by median separability (0.5 = none, 1 = perfect)",
+            if (reps_only) {
+                "\n(+n) = number of other features with |rho| >= threshold that it stands for"
+            } else {
+                ""
+            }
+        )
         return(
             ggplot2::ggplot(
                 d,
@@ -5012,16 +5425,82 @@ plot.feature_screen <- function(
                     x = NULL,
                     y = NULL,
                     title = "Which features separate which behaviours?",
-                    subtitle = paste0(
-                        "Top ",
-                        nrow(keep),
-                        " features by median separability (0.5 = none, 1 = perfect)"
-                    )
+                    subtitle = sub
                 ) +
                 th +
                 ggplot2::theme(
                     axis.text.x = ggplot2::element_text(angle = 45, hjust = 1)
                 )
+        )
+    }
+    if (type == "clusters") {
+        if (is.null(x$clusters)) {
+            rlang::abort("No cluster x label table (needs labels).")
+        }
+        if (is.null(k)) {
+            k <- if (!is.null(x$stability)) {
+                max(x$stability$k[x$stability$near_max %in% TRUE])
+            } else {
+                x$settings$n_labels
+            }
+        }
+        if (!k %in% x$clusters$k) {
+            rlang::abort(paste0("K = ", k, " was not tested."))
+        }
+        d <- x$clusters |>
+            dplyr::filter(.data$k == !!k) |>
+            dplyr::mutate(share = .data$n / sum(.data$n), .by = "label")
+        # order clusters by the label they hold most of, so the diagonal reads well
+        lab_order <- sort(unique(d$label))
+        dom <- d |>
+            dplyr::slice_max(
+                .data$share,
+                n = 1,
+                with_ties = FALSE,
+                by = "cluster"
+            )
+        cl_order <- dom$cluster[order(match(dom$label, lab_order), -dom$share)]
+        d$cluster <- factor(d$cluster, levels = cl_order)
+        d$label <- factor(d$label, levels = rev(lab_order))
+        ari <- if (!is.null(x$cluster_agreement)) {
+            x$cluster_agreement$ari_labels[x$cluster_agreement$k == k]
+        } else {
+            NA
+        }
+        return(
+            ggplot2::ggplot(
+                d,
+                ggplot2::aes(.data$cluster, .data$label, fill = .data$share)
+            ) +
+                ggplot2::geom_tile(colour = "white") +
+                ggplot2::geom_text(
+                    ggplot2::aes(label = .data$n, colour = .data$share > 0.5),
+                    size = 3,
+                    show.legend = FALSE
+                ) +
+                ggplot2::scale_colour_manual(
+                    values = c(`TRUE` = "black", `FALSE` = "white")
+                ) +
+                ggplot2::scale_fill_viridis_c(
+                    limits = c(0, 1),
+                    name = "Share of\nbehaviour"
+                ) +
+                ggplot2::labs(
+                    x = "k-means cluster",
+                    y = NULL,
+                    title = "Which behaviours end up in the same cluster?",
+                    subtitle = paste0(
+                        "k-means on all redundancy representatives, K = ",
+                        k,
+                        if (!is.na(ari)) {
+                            paste0(" (ARI with labels = ", round(ari, 2), ")")
+                        } else {
+                            ""
+                        },
+                        ".\nNumbers = bouts; colour = share of each behaviour's bouts (rows sum to 1)."
+                    )
+                ) +
+                th
         )
     }
     g <- x$groups |>

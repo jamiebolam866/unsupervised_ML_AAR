@@ -279,7 +279,8 @@ vulture_features <- calc_features(
     "collins",
     "harvey_carroll",
     "arrieta",
-    "eikelboom"
+    "eikelboom",
+    "vaadia"
   ),
   catch24 = TRUE,
   sensors = vulture_sensors,
@@ -301,6 +302,7 @@ feature_sets("yu_full") # what a set contains
 feature_sets("yu_reduced") # what a set contains
 feature_sets("rabc_time2") # what a set contains
 feature_sets("harvey_carroll") # what a set contains
+feature_sets("vaadia") # what a set contains
 
 # tic()
 # vulture_features <- calc_features(
@@ -376,7 +378,8 @@ v2 <- calc_features(
     "collins",
     "harvey_carroll",
     "arrieta",
-    "eikelboom"
+    "eikelboom",
+    "vaadia"
   ),
   features = list(
     mean = mean,
@@ -620,7 +623,8 @@ cats_lab_features <- calc_features(
     "collins",
     "harvey_carroll",
     "arrieta",
-    "eikelboom"
+    "eikelboom",
+    "vaadia"
   ),
   sensors = cats_sensors,
   winlen_dba_s = 1, # 2s segment windows
@@ -734,7 +738,8 @@ cats_unlab_features <- calc_features(
     "collins",
     "harvey_carroll",
     "arrieta",
-    "eikelboom"
+    "eikelboom",
+    "vaadia"
   ),
   sensors = cats_sensors,
   winlen_dba_s = 1, # 2s segment windows
@@ -808,16 +813,33 @@ cats_unlab_features %>%
 # Per-feature screening of a calc_features() output, before feature selection.
 # Scores every feature on several complementary criteria, with or without
 # behaviour labels, and returns tidy tables you can sort, filter and plot.
+
+# default screen_features uses RobustSigmoid normalisation
+
 tic()
-scr_vf1 <- screen_features(vulture_features) # default K sweep 2–12
+scr_vf <- screen_features(vulture_features) # default K sweep 2–12
 toc()
 
-# 226.48 sec - 4 mins!
+# 274.37 sec - 5 mins!
 scr_vf # summary, incl. the largest stable K
 scr_vf$summary # one row per feature, all criteria
 plot(scr_vf, "stability") # also "pairs", "redundancy"
 plot(scr_vf, "pairs")
 plot(scr_vf, "redundancy")
+plot(scr_vf, "clusters", k = 2)
+plot(scr_vf, "clusters", k = 3)
+plot(scr_vf, "clusters", k = 5)
+plot(scr_vf, "clusters", k = 6)
+
+# we can see standing is largely split into 3 main clusters - how come?
+scr_vf$assignments |>
+  dplyr::filter(label == "Standing") |>
+  dplyr::count(id, k5) |>
+  tidyr::pivot_wider(names_from = k5, values_from = n, values_fill = 0)
+
+vultures_tsbl %>%
+  dplyr::filter(label == "Standing") %>%
+  dplyr::count(id, attachment)
 
 scr_vf$scores
 
@@ -825,26 +847,137 @@ scr_vf$pairs
 scr_vf$groups
 scr_vf$stability
 
-dir.create("03_plots/screen", recursive = TRUE, showWarnings = FALSE)
-readr::write_csv(scr_vf$summary, "03_plots/screen/vultures_summary.csv")
-readr::write_csv(scr_vf$groups, "03_plots/screen/vultures_groups.csv")
-readr::write_csv(scr_vf$stability, "03_plots/screen/vultures_stability.csv")
-readr::write_csv(scr_vf$pairs, "03_plots/screen/vultures_pairs.csv")
+
+# To see what the three Standing types are, compare their typical feature values
+# (this uses this run’s cluster numbers):
+feat <- c(
+  "stat__acc_x__sd",
+  "stat__acc_y__sd",
+  "stat__acc_z__sd",
+  "stat__acc_x__mean",
+  "stat__acc_y__mean",
+  "stat__acc_z__mean",
+  "orient__acc_x_acc_y_acc_z__pitch_mean",
+  "orient__acc_x_acc_y_acc_z__roll_mean"
+)
+st <- scr_vf$assignments |>
+  dplyr::filter(label == "Standing", k5 %in% c(1, 3, 4))
+st <- dplyr::bind_cols(st, vulture_features[st$.row, feat])
+st |>
+  dplyr::group_by(k5) |>
+  dplyr::summarise(n = dplyr::n(), dplyr::across(dplyr::all_of(feat), median)) # %>% View()
+
+# use plot_signal to view data
+k5_scr_vf1 <- scr_vf$assignments |>
+  dplyr::mutate(bout = vulture_features$bout[.row]) |>
+  dplyr::select(id, bout, cluster_k5 = k5) |>
+  dplyr::mutate(cluster_k5 = factor(cluster_k5))
+vult_cl_vf1 <- dplyr::left_join(vultures_tsbl, k5_scr_vf1, by = c("id", "bout"))
+
+# "clusters mode": one bird, arranged by cluster instead of behaviour
+plot_signal(
+  vult_cl_vf1,
+  c(acc_x, acc_y, acc_z),
+  mode = "behaviours",
+  id = "202385",
+  label_col = "cluster_k5",
+  fs = 20
+)
+
+# one cluster, every bird
+plot_signal(
+  vult_cl_vf1,
+  c(acc_x, acc_y, acc_z),
+  mode = "individuals",
+  behaviour = "4",
+  label_col = "cluster_k5",
+  fs = 20
+)
+
+# Standing only, arranged by cluster (the three Standing types side by side)
+plot_signal(
+  dplyr::filter(vult_cl_vf1, label == "Standing"),
+  c(acc_x, acc_y, acc_z),
+  mode = "behaviours",
+  id = "202385",
+  label_col = "cluster_k5",
+  fs = 20
+)
+
+#####
+#### rerun screen_features with z-score normalisation and see impact
+tic()
+scr_vf2 <- screen_features(vulture_features, norm_method = "zScore") # default K sweep 2–12
+toc()
+
+scr_vf2 # summary, incl. the largest stable K
+scr_vf2$summary # one row per feature, all criteria
+plot(scr_vf2, "stability") # also "pairs", "redundancy"
+plot(scr_vf2, "pairs")
+plot(scr_vf2, "redundancy")
+plot(scr_vf2, "clusters", k = 5)
+
+# we can see standing is largely split into 3 main clusters - how come?
+scr_vf2$assignments |>
+  dplyr::filter(label == "Standing") |>
+  dplyr::count(id, k5) |>
+  tidyr::pivot_wider(names_from = k5, values_from = n, values_fill = 0)
+
+scr_vf2$scores
+scr_vf2$pairs
+scr_vf2$groups
+scr_vf2$stability
+
+# To see what the three Standing types are, compare their typical feature values
+# (this uses this run’s cluster numbers):
+feat <- c(
+  "stat__acc_x__sd",
+  "stat__acc_y__sd",
+  "stat__acc_z__sd",
+  "stat__acc_x__mean",
+  "stat__acc_y__mean",
+  "stat__acc_z__mean",
+  "orient__acc_x_acc_y_acc_z__pitch_mean",
+  "orient__acc_x_acc_y_acc_z__roll_mean"
+)
+st <- scr_vf2$assignments |>
+  dplyr::filter(label == "Standing", k5 %in% c(1, 4, 5))
+st <- dplyr::bind_cols(st, vulture_features[st$.row, feat])
+st |>
+  dplyr::group_by(k5) |>
+  dplyr::summarise(
+    n = dplyr::n(),
+    dplyr::across(dplyr::all_of(feat), median)
+  ) %>%
+  View()
+
+# save plots
+dir.create("03_plots/screen2", recursive = TRUE, showWarnings = FALSE)
+readr::write_csv(scr_vf$summary, "03_plots/screen2/vultures_summary.csv")
+readr::write_csv(scr_vf$groups, "03_plots/screen2/vultures_groups.csv")
+readr::write_csv(scr_vf$stability, "03_plots/screen2/vultures_stability.csv")
+readr::write_csv(scr_vf$pairs, "03_plots/screen2/vultures_pairs.csv")
 ggplot2::ggsave(
-  "03_plots/screen/vultures_stability.png",
+  "03_plots/screen2/vultures_stability.png",
   plot(scr_vf, "stability"),
   width = 8,
   height = 5
 )
 ggplot2::ggsave(
-  "03_plots/screen/vultures_pairs.png",
+  "03_plots/screen2/vultures_pairs.png",
   plot(scr_vf, "pairs"),
   width = 10,
   height = 7
 )
 ggplot2::ggsave(
-  "03_plots/screen/vultures_redundancy.png",
+  "03_plots/screen2/vultures_redundancy.png",
   plot(scr_vf, "redundancy"),
+  width = 8,
+  height = 7
+)
+ggplot2::ggsave(
+  "03_plots/screen2/vultures_clusters_k5.png",
+  plot(scr_vf, "clusters", k = 5),
   width = 8,
   height = 7
 )
